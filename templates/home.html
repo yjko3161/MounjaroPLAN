@@ -64,9 +64,10 @@
   <section class="tab-panel" id="tab-input">
     <div class="card">
       <h2>계산기</h2>
-      {% set period_weeks = (form_data.get('period_weeks') or 24)|int %}
       {% set weekly_plan_raw = form_data.get('weekly_dose_plan','') %}
       {% set weekly_plan_list = weekly_plan_raw.split(',') if weekly_plan_raw else [] %}
+      {% set weekly_plan_len = (weekly_plan_list|length) %}
+      {% set period_weeks = (form_data.get('period_weeks') or weekly_plan_len or 24)|int %}
       {% set dose_options = ['0','2.5','5','7.5','10','12.5','15'] %}
       <div class="current-week-pill" id="current-week-indicator">플랜 시작일을 입력하면 현재 주차를 계산합니다.</div>
       <form method="post" action="/generate" id="plan-form">
@@ -79,6 +80,18 @@
           <div><label>예상 진행 기간(주)</label><input type="number" step="1" name="period_weeks" value="{{ form_data.get('period_weeks','24') }}" placeholder="예: 24" /></div>
           <div style="grid-column: span 2;">
             <label>주차별 실제 투여 용량</label>
+            <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); margin-bottom: 10px;">
+              {% for dose in ['2.5','5','7.5','10','12.5','15'] %}
+                <div>
+                  <label style="font-weight: 600;">{{ dose }}mg 회차</label>
+                  <select class="dose-count-select" data-dose="{{ dose }}">
+                    {% for count in range(0, period_weeks + 1) %}
+                      <option value="{{ count }}" {% if weekly_plan_list and weekly_plan_list|count(dose) == count %}selected{% endif %}>{{ count }}회</option>
+                    {% endfor %}
+                  </select>
+                </div>
+              {% endfor %}
+            </div>
             <div class="weekly-plan-grid">
               {% for week in range(1, period_weeks + 1) %}
                 {% set selected_value = '5' %}
@@ -324,6 +337,7 @@
   const startDateInput = document.querySelector('input[name="start_date"]');
   const periodWeeksInput = document.querySelector('input[name="period_weeks"]');
   const currentWeekIndicator = document.getElementById('current-week-indicator');
+  const doseCountSelects = document.querySelectorAll('.dose-count-select');
 
   function activateTab(target) {
     tabButtons.forEach(btn =>
@@ -348,6 +362,55 @@
     if (!weeklyPlanHidden || weeklySelects.length === 0) return;
     const values = Array.from(weeklySelects).map(select => select.value || '5');
     weeklyPlanHidden.value = values.join(',');
+    updateDoseCountSelectorsFromPlan(values);
+  }
+
+  function updateDoseCountSelectorsFromPlan(planValues) {
+    const counts = planValues.reduce((acc, dose) => {
+      acc[dose] = (acc[dose] || 0) + 1;
+      return acc;
+    }, {});
+
+    doseCountSelects.forEach(select => {
+      const dose = select.dataset.dose;
+      const count = counts[dose] || 0;
+      if (select.querySelector(`option[value="${count}"]`)) {
+        select.value = String(count);
+      }
+    });
+  }
+
+  function applyDoseCountsToWeeklyPlan() {
+    if (weeklySelects.length === 0) return;
+    const targetWeeks = parseInt(periodWeeksInput?.value || `${weeklySelects.length}`, 10);
+    const totalWeeks = Number.isFinite(targetWeeks) && targetWeeks > 0 ? targetWeeks : weeklySelects.length;
+
+    const plan = [];
+    doseCountSelects.forEach(select => {
+      const dose = select.dataset.dose;
+      const count = parseInt(select.value || '0', 10);
+      if (!Number.isFinite(count) || count <= 0) return;
+      for (let i = 0; i < count; i += 1) {
+        if (plan.length < totalWeeks) plan.push(dose);
+      }
+    });
+
+    if (plan.length === 0) {
+      plan.push('5');
+    }
+
+    while (plan.length < totalWeeks) {
+      plan.push(plan[plan.length - 1]);
+    }
+
+    plan.splice(totalWeeks);
+
+    weeklySelects.forEach((select, idx) => {
+      const value = plan[idx] ?? plan[plan.length - 1];
+      select.value = value;
+    });
+
+    syncWeeklyPlanString();
   }
 
   function highlightCurrentWeek(weekIndex) {
@@ -401,11 +464,13 @@
   }
 
   weeklySelects.forEach(select => select.addEventListener('change', syncWeeklyPlanString));
+  doseCountSelects.forEach(select => select.addEventListener('change', applyDoseCountsToWeeklyPlan));
   startDateInput?.addEventListener('change', calculateCurrentWeek);
   startDateInput?.addEventListener('blur', calculateCurrentWeek);
   periodWeeksInput?.addEventListener('input', calculateCurrentWeek);
 
   syncWeeklyPlanString();
+  applyDoseCountsToWeeklyPlan();
   calculateCurrentWeek();
 
   // 감량 그래프

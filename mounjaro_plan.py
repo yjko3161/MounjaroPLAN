@@ -365,6 +365,52 @@ def _simulate_weekly_course(cfg: Config, steps: List[PlanStep]) -> List[Dict[str
 def simulate_plan(cfg: Config, steps: List[PlanStep]) -> List[PlanRow]:
     """Simulate 감량을 목표 체중까지 이어가도록 반복합니다."""
 
+    if cfg.weekly_dose_plan:
+        plan_rows: List[PlanRow] = []
+        weekly_dose_plan, total_weeks = _apply_total_weeks(cfg, cfg.weekly_dose_plan)
+        projection = _project_weekly_losses(cfg, weekly_dose_plan, total_weeks)
+
+        if len(projection) <= 1:
+            return []
+
+        idx = 1  # projection[0]은 시작점
+        start_weight = projection[0]["expected_weight_kg"]
+        dose_to_name = {step.dose: step.name for step in steps}
+
+        while idx < len(projection):
+            current_dose = projection[idx]["dose_mg"]
+            start_idx = idx
+            while idx < len(projection) and projection[idx]["dose_mg"] == current_dose:
+                idx += 1
+
+            group = projection[start_idx:idx]
+            expected_loss = sum(item["expected_loss_kg"] for item in group)
+            expected_weight = group[-1]["expected_weight_kg"] if group else start_weight
+
+            if cfg.current_weight <= expected_weight:
+                status = "완료"
+            elif cfg.current_weight < start_weight:
+                status = "진행 중"
+            else:
+                status = "예정"
+
+            plan_rows.append(
+                PlanRow(
+                    step_name=dose_to_name.get(current_dose, f"{current_dose}mg"),
+                    weeks=len(group),
+                    dose=current_dose,
+                    phase="사용자 입력",
+                    expected_loss=round(expected_loss, 1),
+                    expected_weight=round(expected_weight, 1),
+                    start_weight=round(start_weight, 1),
+                    status=status,
+                )
+            )
+
+            start_weight = expected_weight
+
+        return plan_rows
+
     weekly_course = _simulate_weekly_course(cfg, steps)
     if not weekly_course:
         return []
@@ -491,36 +537,31 @@ def _normalized_weekly_dose_plan(cfg: Config, plan_rows: List[PlanRow], steps: O
     return []
 
 
-def build_weight_projection(cfg: Config, plan_rows: List[PlanRow], steps: Optional[List[PlanStep]] = None) -> List[Dict[str, Any]]:
-    """Create weekly weight projection strictly following the provided dose plan."""
+def _apply_total_weeks(cfg: Config, weekly_dose_plan: List[float]) -> tuple[List[float], int]:
+    """Extend or seed the weekly 용량 계획 to match the 사용자가 입력한 기간."""
 
-    total_target_loss = max(cfg.start_weight - cfg.target_weight, 0.0)
-    if total_target_loss <= 0:
-        return [
-            {
-                "week_index": 0,
-                "dose_mg": 0.0,
-                "expected_loss_kg": 0.0,
-                "expected_weight_kg": round(cfg.start_weight, 1),
-                "label": "시작",
-            }
-        ]
-
-    weekly_dose_plan = _normalized_weekly_dose_plan(cfg, plan_rows, steps)
     total_weeks = cfg.period_weeks or len(weekly_dose_plan)
     if total_weeks <= 0:
         total_weeks = len(weekly_dose_plan) or 12
 
-    if not weekly_dose_plan:
-        weekly_dose_plan = [2.5] * total_weeks
-    elif len(weekly_dose_plan) < total_weeks:
-        weekly_dose_plan.extend([weekly_dose_plan[-1]] * (total_weeks - len(weekly_dose_plan)))
+    plan = list(weekly_dose_plan)
+    if not plan:
+        plan = [2.5] * total_weeks
+    elif len(plan) < total_weeks:
+        plan.extend([plan[-1]] * (total_weeks - len(plan)))
+
+    return plan, total_weeks
+
+
+def _project_weekly_losses(cfg: Config, weekly_dose_plan: List[float], total_weeks: int) -> List[Dict[str, Any]]:
+    """공통 로직: 주차별 투약/감량 시계열을 생성한다."""
 
     try:
         start_date = datetime.fromisoformat(cfg.start_date).date() if cfg.start_date else None
     except ValueError:
         start_date = None
 
+    total_target_loss = max(cfg.start_weight - cfg.target_weight, 0.0)
     raw_losses: List[float] = []
     total_lost_raw = 0.0
     prev_dose = weekly_dose_plan[0]
@@ -589,6 +630,26 @@ def build_weight_projection(cfg: Config, plan_rows: List[PlanRow], steps: Option
         )
 
     return projection
+
+
+def build_weight_projection(cfg: Config, plan_rows: List[PlanRow], steps: Optional[List[PlanStep]] = None) -> List[Dict[str, Any]]:
+    """Create weekly weight projection strictly following the provided dose plan."""
+
+    total_target_loss = max(cfg.start_weight - cfg.target_weight, 0.0)
+    if total_target_loss <= 0:
+        return [
+            {
+                "week_index": 0,
+                "dose_mg": 0.0,
+                "expected_loss_kg": 0.0,
+                "expected_weight_kg": round(cfg.start_weight, 1),
+                "label": "시작",
+            }
+        ]
+
+    weekly_dose_plan = _normalized_weekly_dose_plan(cfg, plan_rows, steps)
+    weekly_dose_plan, total_weeks = _apply_total_weeks(cfg, weekly_dose_plan)
+    return _project_weekly_losses(cfg, weekly_dose_plan, total_weeks)
 
 
 def predict_body_composition(cfg: Config, plan_rows: List[PlanRow], steps: List[PlanStep]) -> List[BodyCompRow]:

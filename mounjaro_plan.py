@@ -36,8 +36,9 @@ class Config:
     target_weight: float
     loss_2_5: float = -4.0
     loss_5: float = -3.0
-    loss_7_5: float = -2.5
-    loss_10: float = -2.5
+    loss_7_5: float = -3.0
+    loss_10: float = -4.0
+    activity_level: str = "baseline"  # baseline | none | moderate | active
     skeletal_muscle: Optional[float] = None
     fat_mass: Optional[float] = None
     visceral_level: Optional[float] = None
@@ -52,10 +53,15 @@ class Config:
 class CostSummary:
     adaptation_cost: int
     maintenance_cost: int
+    completed_adaptation_cost: int
 
     @property
     def total_cost(self) -> int:
         return self.adaptation_cost + self.maintenance_cost
+
+    @property
+    def upcoming_adaptation_cost(self) -> int:
+        return max(self.adaptation_cost - self.completed_adaptation_cost, 0)
 
 
 @dataclass
@@ -63,8 +69,11 @@ class PlanRow:
     step_name: str
     weeks: int
     dose: float
+    phase: str
     expected_loss: float
     expected_weight: float
+    start_weight: float
+    status: str
 
 
 @dataclass
@@ -112,10 +121,11 @@ def apply_defaults(config: Dict[str, Any]) -> Config:
         start_weight=start_weight,
         current_weight=current_weight,
         target_weight=target_weight,
-        loss_2_5=_safe_float(config.get("loss_2_5"), -4.0),
-        loss_5=_safe_float(config.get("loss_5"), -3.0),
-        loss_7_5=_safe_float(config.get("loss_7_5"), -2.5),
-        loss_10=_safe_float(config.get("loss_10"), -2.5),
+        loss_2_5=_safe_float(config.get("loss_2_5"), -3.0),
+        loss_5=_safe_float(config.get("loss_5"), -2.5),
+        loss_7_5=_safe_float(config.get("loss_7_5"), -3.0),
+        loss_10=_safe_float(config.get("loss_10"), -4.0),
+        activity_level=str(config.get("activity_level") or "baseline"),
         skeletal_muscle=config.get("skeletal_muscle"),
         fat_mass=config.get("fat_mass"),
         visceral_level=config.get("visceral_level"),
@@ -130,42 +140,76 @@ def apply_defaults(config: Dict[str, Any]) -> Config:
 def build_steps(cfg: Config) -> List[PlanStep]:
     """Create the ordered list of plan steps with defaults."""
 
+    def _activity_adjusted_losses() -> Dict[str, float]:
+        base = {"2.5mg": -3.0, "5mg": -2.5, "7.5mg": -3.0, "10mg": -4.0}
+        adjustments = {
+            "none": {"7.5mg": -2.0, "10mg": -3.0},
+            "moderate": {"7.5mg": -3.5, "10mg": -4.5},
+            "active": {"7.5mg": -5.0, "10mg": -7.0},
+        }
+        override = adjustments.get(cfg.activity_level.lower(), {})
+        return {**base, **override}
+
+    activity_defaults = _activity_adjusted_losses()
+
     return [
-        PlanStep("2.5mg", 2.5, cfg.loss_2_5 or -4.0, 280000),
-        PlanStep("5mg", 5.0, cfg.loss_5 or -3.0, 380000),
-        PlanStep("7.5mg", 7.5, cfg.loss_7_5 or -2.5, 549000),
-        PlanStep("10mg", 10.0, cfg.loss_10 or -2.5, 549000),
+        PlanStep("2.5mg", 2.5, cfg.loss_2_5 or activity_defaults["2.5mg"], 280000),
+        PlanStep("5mg", 5.0, cfg.loss_5 or activity_defaults["5mg"], 380000),
+        PlanStep("7.5mg", 7.5, cfg.loss_7_5 or activity_defaults["7.5mg"], 549000),
+        PlanStep("10mg", 10.0, cfg.loss_10 or activity_defaults["10mg"], 549000),
     ]
 
 
-def simulate_plan(cfg: Config, steps: List[PlanStep]) -> List[PlanRow]:
-    """Simulate the adaptation phase weight changes."""
+PHASE_DECAY = [1.0, 0.8, 0.6]
 
-    # If the target is not below the start weight, return an empty plan.
+
+def _phase_label(index: int) -> str:
+    mapping = {
+        0: "초기(1~4주)",
+        1: "중기(5~8주)",
+        2: "후기(9~12주+)",
+    }
+    return mapping.get(index, "후기(9~12주+)")
+
+
+def simulate_plan(cfg: Config, steps: List[PlanStep]) -> List[PlanRow]:
+    """Simulate the adaptation phase weight changes with phase decay."""
+
     if cfg.target_weight >= cfg.start_weight:
         return []
 
     current = cfg.start_weight
     plan_rows: List[PlanRow] = []
 
-    for step in steps:
+    for step_index, step in enumerate(steps):
         if step.dose > cfg.maintenance_start_dose:
             break
 
-        if current <= cfg.target_weight:
-            possible_loss = 0.0
-        else:
-            possible_loss = min(abs(step.loss), max(current - cfg.target_weight, 0))
+        phase_idx = min(step_index, len(PHASE_DECAY) - 1)
+        phase_loss = abs(step.loss) * PHASE_DECAY[phase_idx]
 
+        start_weight = current
+        remaining_to_target = max(current - cfg.target_weight, 0)
+        possible_loss = min(phase_loss, remaining_to_target)
         new_weight = current - possible_loss
+
+        if cfg.current_weight <= new_weight:
+            status = "완료"
+        elif cfg.current_weight < start_weight:
+            status = "진행 중"
+        else:
+            status = "예정"
 
         plan_rows.append(
             PlanRow(
                 step_name=step.name,
                 weeks=4,
                 dose=step.dose,
+                phase=_phase_label(phase_idx),
                 expected_loss=round(possible_loss, 1),
                 expected_weight=round(new_weight, 1),
+                start_weight=round(start_weight, 1),
+                status=status,
             )
         )
 
@@ -178,11 +222,13 @@ def simulate_plan(cfg: Config, steps: List[PlanStep]) -> List[PlanRow]:
 
 
 def calculate_costs(cfg: Config, plan_rows: List[PlanRow], steps: List[PlanStep]) -> CostSummary:
-    """Calculate adaptation and maintenance costs."""
+    """Calculate adaptation and maintenance costs including completed history."""
 
-    # Adaptation cost equals the number of executed plan rows multiplied by their respective prices
     price_lookup = {step.name: step.price for step in steps}
     adaptation_cost = sum(price_lookup.get(row.step_name, 0) for row in plan_rows)
+    completed_adaptation_cost = sum(
+        price_lookup.get(row.step_name, 0) for row in plan_rows if row.status in {"완료", "진행 중"}
+    )
 
     total_maintenance_weeks = cfg.maintenance_months * 4
     shots_needed = ceil(total_maintenance_weeks / cfg.maintenance_interval_weeks)
@@ -197,7 +243,11 @@ def calculate_costs(cfg: Config, plan_rows: List[PlanRow], steps: List[PlanStep]
 
     maintenance_cost = bundles * price_maint if bundles > 0 else 0
 
-    return CostSummary(adaptation_cost=adaptation_cost, maintenance_cost=maintenance_cost)
+    return CostSummary(
+        adaptation_cost=adaptation_cost,
+        maintenance_cost=maintenance_cost,
+        completed_adaptation_cost=completed_adaptation_cost,
+    )
 
 
 def predict_body_composition(cfg: Config, plan_rows: List[PlanRow]) -> List[BodyCompRow]:
@@ -213,14 +263,25 @@ def predict_body_composition(cfg: Config, plan_rows: List[PlanRow]) -> List[Body
     except (TypeError, ValueError):
         return []
 
+    start_delta = max(cfg.start_weight - curr_weight, 0)
+    start_fat = max(curr_fat + start_delta * FAT_RATIO, 0)
+    start_muscle = max(curr_muscle + start_delta * MUSCLE_RATIO, 0)
+
     rows: List[BodyCompRow] = [
+        BodyCompRow(
+            label="시작(추정)",
+            weight=round(cfg.start_weight, 1),
+            skeletal_muscle=round(start_muscle, 1),
+            fat_mass=round(start_fat, 1),
+            body_fat_percent=round(start_fat / cfg.start_weight * 100, 1) if cfg.start_weight > 0 else 0,
+        ),
         BodyCompRow(
             label="현재",
             weight=round(curr_weight, 1),
             skeletal_muscle=round(curr_muscle, 1),
             fat_mass=round(curr_fat, 1),
             body_fat_percent=round(curr_fat / curr_weight * 100, 1) if curr_weight > 0 else 0,
-        )
+        ),
     ]
 
     for row in plan_rows:
@@ -256,14 +317,15 @@ def _render_plan_table(plan_rows: List[PlanRow]) -> str:
         return "<p>감량 계획이 필요하지 않습니다.</p>"
 
     rows_html = "".join(
-        f"<tr><td>{idx + 1}</td><td>{row.weeks}</td><td>{row.dose:.1f}</td>"
-        f"<td>{row.expected_loss:.1f}</td><td>{row.expected_weight:.1f}</td></tr>"
+        f"<tr><td>{idx + 1}</td><td>{row.phase}</td><td>{row.weeks}</td><td>{row.dose:.1f}</td>"
+        f"<td>{row.expected_loss:.1f}</td><td>{row.start_weight:.1f} → {row.expected_weight:.1f}</td>"
+        f"<td>{row.status}</td></tr>"
         for idx, row in enumerate(plan_rows)
     )
     return f"""
     <table>
       <thead>
-        <tr><th>단계</th><th>기간(주)</th><th>투여 용량(mg)</th><th>예상 감량(kg)</th><th>예상 체중(kg)</th></tr>
+        <tr><th>순서</th><th>페이즈</th><th>기간(주)</th><th>투여 용량(mg)</th><th>예상 감량(kg)</th><th>체중 변화(kg)</th><th>상태</th></tr>
       </thead>
       <tbody>{rows_html}</tbody>
     </table>
@@ -275,6 +337,8 @@ def _render_cost_table(cost_summary: CostSummary) -> str:
     return f"""
     <table>
       <tbody>
+        <tr><th>적응기 누적비용</th><td>{format_currency(cost_summary.completed_adaptation_cost)}원</td></tr>
+        <tr><th>적응기 예정비용</th><td>{format_currency(cost_summary.upcoming_adaptation_cost)}원</td></tr>
         <tr><th>적응기 총비용</th><td>{format_currency(cost_summary.adaptation_cost)}원</td></tr>
         <tr><th>유지기 총비용</th><td>{format_currency(cost_summary.maintenance_cost)}원</td></tr>
         <tr class='total'><th>전체 합계</th><td><strong>{format_currency(cost_summary.total_cost)}원</strong></td></tr>
@@ -310,21 +374,40 @@ def _render_body_comp_table(rows: List[BodyCompRow], cfg: Config) -> str:
         </thead>
         <tbody>{rows_html}</tbody>
       </table>
-      <p class='note'>모든 체성분 값은 단순 비율 모델에 따른 추정치이며, 실제 인바디 측정값과 다를 수 있습니다.</p>
+      <p class='note'>모든 체성분 값은 단순 비율 모델에 따른 추정치이며, 시작 시점 수치는 현재 값에서 비율을 역산한 가상의 값입니다. 실제 인바디 측정값과 다를 수 있습니다.</p>
       <p class='note'>{visceral_note}</p>
       <p class='note'>{whr_note}</p>
     </div>
     """
 
 
+def _activity_label(level: str) -> str:
+    mapping = {
+        "baseline": "기본(보수적)",
+        "none": "운동 거의 안 함",
+        "moderate": "운동 보통",
+        "active": "운동 열심히",
+    }
+    return mapping.get(level.lower(), level)
+
+
 def generate_html(
-    cfg: Config, plan_rows: List[PlanRow], cost_summary: CostSummary, body_comp_rows: List[BodyCompRow]
+    cfg: Config,
+    plan_rows: List[PlanRow],
+    cost_summary: CostSummary,
+    body_comp_rows: List[BodyCompRow],
+    steps: List[PlanStep],
 ) -> str:
+    remaining_loss = max(cfg.current_weight - cfg.target_weight, 0)
+    achieved_loss = max(cfg.start_weight - cfg.current_weight, 0)
+
     overview = f"""
     <div class='card'>
       <h2>개요</h2>
       <p>시작 체중: {cfg.start_weight} kg / 현재 체중: {cfg.current_weight} kg / 목표 체중: {cfg.target_weight} kg</p>
-      <p>감량 가정 (4주 예상 감량): 2.5mg {cfg.loss_2_5} kg, 5mg {cfg.loss_5} kg, 7.5mg {cfg.loss_7_5} kg, 10mg {cfg.loss_10} kg</p>
+      <p>이미 감량: {achieved_loss:.1f} kg / 목표까지 남은 감량: {remaining_loss:.1f} kg</p>
+      <p>1단계(초기 4주) 감량 가정: {' , '.join(f"{s.name} {s.loss:.1f}kg" for s in steps)}</p>
+      <p>페이즈 약화 규칙: 2단계 x0.8, 3단계 x0.6 (초기&gt;중기&gt;후기로 완만해짐) / 활동 수준: {_activity_label(cfg.activity_level)}</p>
       <p>유지 플랜: {cfg.maintenance_start_dose}mg 이후 유지 시작, 유지 용량 {cfg.maintenance_dose}mg, {cfg.maintenance_interval_weeks}주 간격, {cfg.maintenance_months}개월</p>
     </div>
     """
@@ -340,15 +423,52 @@ def generate_html(
     <div class='card'>
       <h2>비용 요약</h2>
       {_render_cost_table(cost_summary)}
+      <p class='note'>입력한 현재 체중을 기준으로 이미 거친 단계는 '누적비용'에, 앞으로 필요한 단계는 '예정비용'에 반영했습니다. 유지비용을 더해 총합을 표시합니다.</p>
     </div>
     """
 
     body_comp_section = _render_body_comp_table(body_comp_rows, cfg)
 
+    pattern_section = """
+    <div class='card'>
+      <h2>초기~중기 감량 참고치</h2>
+      <p class='note'>SURMOUNT 그래프와 실사용 경험을 단순 요약한 참고 범위입니다. 이 계산기는 1→2→3단계로 갈수록 0.8, 0.6배로 자동 완화합니다.</p>
+      <table>
+        <thead><tr><th>기간</th><th>보편적 감량 경향</th></tr></thead>
+        <tbody>
+          <tr><td>1~4주</td><td>-2 ~ -4kg</td></tr>
+          <tr><td>5~8주</td><td>-2 ~ -5kg</td></tr>
+          <tr><td>9~12주</td><td>-3 ~ -6kg</td></tr>
+          <tr><td>12주 누적</td><td>-6% ~ -12% (약 -6 ~ -12kg)</td></tr>
+        </tbody>
+      </table>
+      <table>
+        <thead><tr><th>7.5mg</th><th>운동 안 함</th><th>운동 보통</th><th>운동 열심히</th></tr></thead>
+        <tbody>
+          <tr><td>1단계(1~4주)</td><td>-2.0kg</td><td>-3.5kg</td><td>-5.0kg</td></tr>
+          <tr><td>2단계(5~8주)</td><td>-1.5kg</td><td>-3.0kg</td><td>-4.0kg</td></tr>
+          <tr><td>3단계(9~12주)</td><td>-1.0kg</td><td>-2.0kg</td><td>-3.0kg</td></tr>
+          <tr><td>3개월 누적</td><td colspan='3'>현실 범위: -6 ~ -12kg</td></tr>
+        </tbody>
+      </table>
+      <table>
+        <thead><tr><th>10mg</th><th>운동 안 함</th><th>운동 보통</th><th>운동 열심히</th></tr></thead>
+        <tbody>
+          <tr><td>1단계(1~4주)</td><td>-3.0kg</td><td>-4.5kg</td><td>-7.0kg</td></tr>
+          <tr><td>2단계(5~8주)</td><td>-2.0kg</td><td>-3.0kg</td><td>-5.0kg</td></tr>
+          <tr><td>3단계(9~12주)</td><td>-1.0kg</td><td>-2.0kg</td><td>-3.0kg</td></tr>
+          <tr><td>3개월 누적</td><td colspan='3'>현실 범위: -8 ~ -15kg (운동 병행 시 -12~-15kg 흔함)</td></tr>
+        </tbody>
+      </table>
+      <p class='note'>계산기는 1단계 기본값(초기 4주 예상 감량)을 입력/활동수준으로 잡고 2단계는 x0.8, 3단계는 x0.6으로 자동 적용합니다. 별도 입력이 없어도 현실적 패턴을 기본으로 사용합니다.</p>
+    </div>
+    """
+
     disclaimer = """
     <div class='card'>
       <h2>주의/면책</h2>
       <p class='note'>※ 이 리포트는 사용자가 입력한 값과 단순 수학적 모델에 기반한 '예상치'입니다. 실제 체중 변화, 혈당·당뇨 상태, 인바디 수치는 개인에 따라 크게 달라질 수 있습니다. 마운자로(티르제파타이드)의 용량 조절, 투여 시작·유지·중단, 다른 약과의 병용 여부 등 모든 의료적 결정은 반드시 담당 의사와 상의하여 결정해야 합니다. 이 프로그램은 의료적 진단이나 처방을 제공하지 않으며, 단지 정보를 정리하고 시각화하는 도구입니다.</p>
+      <p class='note'>기본 감량 가정은 SURMOUNT-1(비당뇨 10mg 평균 약 -19.5%/72주, 4주 평균 약 -1~2kg)과 SURMOUNT-2(당뇨 동반 10mg 평균 약 -13.4%/72주, 4주 평균 약 -0.8~1.5kg) 등 3상 연구의 평균치를 100kg 기준으로 환산해 보수적으로 설정했습니다. 개인별 식단·운동·질환 상태에 따라 실제 감량 속도는 크게 달라질 수 있습니다.</p>
     </div>
     """
 
@@ -373,6 +493,7 @@ def generate_html(
       {plan_section}
       {cost_section}
       {body_comp_section}
+      {pattern_section}
       {disclaimer}
     </body>
     """
@@ -397,7 +518,7 @@ def generate_mounjaro_report(config: Dict[str, Any]) -> Dict[str, Any]:
     cost_summary = calculate_costs(cfg, plan_rows, steps)
     body_comp_rows = predict_body_composition(cfg, plan_rows)
 
-    html = generate_html(cfg, plan_rows, cost_summary, body_comp_rows)
+    html = generate_html(cfg, plan_rows, cost_summary, body_comp_rows, steps)
 
     return {
         "plan_table": [row.__dict__ for row in plan_rows],
@@ -405,6 +526,8 @@ def generate_mounjaro_report(config: Dict[str, Any]) -> Dict[str, Any]:
         "cost_summary": {
             "adaptation_cost": cost_summary.adaptation_cost,
             "maintenance_cost": cost_summary.maintenance_cost,
+            "completed_adaptation_cost": cost_summary.completed_adaptation_cost,
+            "upcoming_adaptation_cost": cost_summary.upcoming_adaptation_cost,
             "total_cost": cost_summary.total_cost,
         },
         "total_cost": cost_summary.total_cost,

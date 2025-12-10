@@ -190,6 +190,15 @@ def build_steps(cfg: Config) -> List[PlanStep]:
 PHASE_DECAY = [1.0, 0.8, 0.6]
 
 
+# 감량 예측 관련 계수
+DOSE_DECAY_FACTOR = 0.65
+PLATEAU_THRESHOLDS = (
+    (10.0, 0.5),
+    (7.0, 0.7),
+    (3.0, 0.85),
+)
+
+
 def _phase_label(index: int) -> str:
     mapping = {
         0: "초기(1~4주)",
@@ -199,27 +208,115 @@ def _phase_label(index: int) -> str:
     return mapping.get(index, "후기(9~12주+)")
 
 
-def simulate_plan(cfg: Config, steps: List[PlanStep]) -> List[PlanRow]:
-    """Simulate 감량을 목표 체중까지 이어가도록 반복합니다."""
+def _base_loss_rate(current_dose_mg: float) -> float:
+    """용량에 따른 기본 주당 감량량(kg).
+
+    구간별 선형 보간을 사용해 2.5~5mg: 약 0.3~0.5, 7.5mg: 약 0.7,
+    10mg 이상: 약 1.0kg/week로 매핑한다.
+    """
+
+    dose = max(current_dose_mg, 0)
+    if dose <= 2.5:
+        return 0.3
+    if dose <= 5:
+        # 2.5~5mg 구간: 0.3 -> 0.5
+        return 0.3 + (dose - 2.5) / 2.5 * 0.2
+    if dose <= 7.5:
+        # 5~7.5mg 구간: 0.5 -> 0.7
+        return 0.5 + (dose - 5.0) / 2.5 * 0.2
+    # 7.5~10+mg 구간: 0.7 -> 1.0 (10mg 기준)
+    capped = min(dose, 12.0)
+    return 0.7 + (capped - 7.5) / 2.5 * 0.3
+
+
+def _plateau_factor(total_lost_kg: float) -> float:
+    """누적 감량량에 따른 플래토 계수(감쇠)."""
+
+    for threshold, factor in PLATEAU_THRESHOLDS:
+        if total_lost_kg >= threshold:
+            return factor
+    return 1.0
+
+
+def _projected_weekly_loss(current_dose_mg: float, prev_dose_mg: float, total_lost_kg: float) -> float:
+    """용량, 감량 추세, 플래토를 반영한 주당 감량량."""
+
+    weekly_loss = _base_loss_rate(current_dose_mg)
+    if prev_dose_mg > current_dose_mg:
+        weekly_loss *= DOSE_DECAY_FACTOR
+
+    weekly_loss *= _plateau_factor(total_lost_kg)
+    return max(weekly_loss, 0.0)
+
+
+def _simulate_weekly_course(cfg: Config, steps: List[PlanStep]) -> List[Dict[str, Any]]:
+    """주차 단위 감량을 시뮬레이션하여 시계열로 반환."""
 
     if cfg.target_weight >= cfg.start_weight:
         return []
 
-    current = cfg.start_weight
-    plan_rows: List[PlanRow] = []
+    weekly_course: List[Dict[str, Any]] = []
+    current_weight = cfg.start_weight
+    total_lost = 0.0
+    prev_dose = steps[0].dose if steps else 0.0
     step_index = 0
 
-    while current > cfg.target_weight:
+    while current_weight > cfg.target_weight:
         step = steps[step_index] if step_index < len(steps) else steps[-1]
-        phase_idx = min(step_index, len(PHASE_DECAY) - 1)
-        phase_loss = abs(step.loss) * PHASE_DECAY[phase_idx]
+        for _ in range(4):
+            if current_weight <= cfg.target_weight:
+                break
 
-        start_weight = current
-        remaining_to_target = max(current - cfg.target_weight, 0)
-        possible_loss = min(phase_loss, remaining_to_target)
-        new_weight = current - possible_loss
+            weekly_loss = _projected_weekly_loss(step.dose, prev_dose, total_lost)
+            weekly_loss = min(weekly_loss, current_weight - cfg.target_weight)
 
-        if cfg.current_weight <= new_weight:
+            if weekly_loss <= 0:
+                return weekly_course
+
+            current_weight = round(current_weight - weekly_loss, 4)
+            total_lost += weekly_loss
+
+            weekly_course.append(
+                {
+                    "step_index": step_index,
+                    "dose": step.dose,
+                    "loss": weekly_loss,
+                    "weight": current_weight,
+                }
+            )
+
+            prev_dose = step.dose
+
+        step_index += 1
+
+    return weekly_course
+
+
+def simulate_plan(cfg: Config, steps: List[PlanStep]) -> List[PlanRow]:
+    """Simulate 감량을 목표 체중까지 이어가도록 반복합니다."""
+
+    weekly_course = _simulate_weekly_course(cfg, steps)
+    if not weekly_course:
+        return []
+
+    plan_rows: List[PlanRow] = []
+    idx = 0
+    start_weight = cfg.start_weight
+
+    while idx < len(weekly_course):
+        step_idx = weekly_course[idx]["step_index"]
+        step = steps[step_idx] if step_idx < len(steps) else steps[-1]
+        phase_idx = min(step_idx, len(PHASE_DECAY) - 1)
+
+        group: List[Dict[str, Any]] = []
+        while idx < len(weekly_course) and weekly_course[idx]["step_index"] == step_idx:
+            group.append(weekly_course[idx])
+            idx += 1
+
+        expected_loss = sum(item["loss"] for item in group)
+        expected_weight = group[-1]["weight"] if group else start_weight
+
+        if cfg.current_weight <= expected_weight:
             status = "완료"
         elif cfg.current_weight < start_weight:
             status = "진행 중"
@@ -229,21 +326,17 @@ def simulate_plan(cfg: Config, steps: List[PlanStep]) -> List[PlanRow]:
         plan_rows.append(
             PlanRow(
                 step_name=step.name,
-                weeks=4,
+                weeks=len(group),
                 dose=step.dose,
                 phase=_phase_label(phase_idx),
-                expected_loss=round(possible_loss, 1),
-                expected_weight=round(new_weight, 1),
+                expected_loss=round(expected_loss, 1),
+                expected_weight=round(expected_weight, 1),
                 start_weight=round(start_weight, 1),
                 status=status,
             )
         )
 
-        if possible_loss <= 0:
-            break
-
-        current = new_weight
-        step_index += 1
+        start_weight = expected_weight
 
     return plan_rows
 
@@ -298,10 +391,12 @@ def summarize_plan(cfg: Config, plan_rows: List[PlanRow]) -> PlanSummary:
     )
 
 
-def build_weight_projection(cfg: Config, plan_rows: List[PlanRow]) -> List[Dict[str, Any]]:
+def build_weight_projection(cfg: Config, plan_rows: List[PlanRow], steps: Optional[List[PlanStep]] = None) -> List[Dict[str, Any]]:
     """Create 1주일 단위 예상 체중 변화(유지 포함)."""
 
-    if not plan_rows:
+    reference_steps = steps or [PlanStep(row.step_name, row.dose, 0, 0) for row in plan_rows if row.phase != "유지"]
+    weekly_course = _simulate_weekly_course(cfg, reference_steps)
+    if not weekly_course:
         return []
 
     try:
@@ -310,27 +405,25 @@ def build_weight_projection(cfg: Config, plan_rows: List[PlanRow]) -> List[Dict[
         start_date = None
 
     projection: List[Dict[str, Any]] = []
-    current_weight = cfg.start_weight
     week_counter = 0
 
     start_label = start_date.isoformat() if start_date else "시작"
-    projection.append({"label": start_label, "weight": round(current_weight, 1)})
+    projection.append({"label": start_label, "weight": round(cfg.start_weight, 1)})
 
-    for row in plan_rows:
-        weekly_loss = row.expected_loss / row.weeks if row.weeks else 0
-        for _ in range(row.weeks):
-            week_counter += 1
-            current_weight = max(cfg.target_weight, round(current_weight - weekly_loss, 2))
+    for entry in weekly_course:
+        week_counter += 1
+        current_weight = entry["weight"]
 
-            if start_date:
-                label_date = start_date + timedelta(weeks=week_counter)
-                label = f"{label_date.isoformat()}"
-            else:
-                label = f"{week_counter}주차"
+        if start_date:
+            label_date = start_date + timedelta(weeks=week_counter)
+            label = f"{label_date.isoformat()}"
+        else:
+            label = f"{week_counter}주차"
 
-            projection.append({"label": label, "weight": round(current_weight, 1)})
+        projection.append({"label": label, "weight": round(current_weight, 1)})
 
     maintenance_weeks = cfg.maintenance_months * 4
+    current_weight = projection[-1]["weight"] if projection else cfg.start_weight
     for _ in range(maintenance_weeks):
         week_counter += 1
         if start_date:
@@ -729,7 +822,7 @@ def generate_mounjaro_report(config: Dict[str, Any]) -> Dict[str, Any]:
     cost_summary = calculate_costs(cfg, plan_rows, steps)
     plan_summary = summarize_plan(cfg, plan_rows)
     body_comp_rows = predict_body_composition(cfg, plan_rows, steps)
-    weight_projection = build_weight_projection(cfg, plan_rows)
+    weight_projection = build_weight_projection(cfg, plan_rows, steps)
     timeline = build_timeline(cfg, plan_rows)
 
     html = generate_html(cfg, plan_rows, cost_summary, body_comp_rows, steps)

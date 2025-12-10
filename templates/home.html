@@ -281,36 +281,46 @@
     </div>
   </section>
 
-  <script>
-    const tabButtons = document.querySelectorAll('.tab-btn');
-    const tabPanels = document.querySelectorAll('.tab-panel');
-    const activeTab = '{{ active_tab }}';
+<script>
+  const tabButtons = document.querySelectorAll('.tab-btn');
+  const tabPanels = document.querySelectorAll('.tab-panel');
+  const activeTab = '{{ active_tab }}';
 
-    function activateTab(target) {
-      tabButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.target === target));
-      tabPanels.forEach(panel => panel.classList.toggle('active', panel.id === `tab-${target}`));
-    }
+  function activateTab(target) {
+    tabButtons.forEach(btn =>
+      btn.classList.toggle('active', btn.dataset.target === target)
+    );
+    tabPanels.forEach(panel =>
+      panel.classList.toggle('active', panel.id === `tab-${target}`)
+    );
+  }
 
-    tabButtons.forEach(btn => {
-      btn.addEventListener('click', () => activateTab(btn.dataset.target));
+  tabButtons.forEach(btn => {
+    btn.addEventListener('click', () => activateTab(btn.dataset.target));
+  });
+
+  // 기본 활성 탭
+  activateTab(activeTab || 'input');
+
+  // 폼 제출 시 로딩 오버레이
+  const form = document.getElementById('plan-form');
+  const overlay = document.getElementById('loading-overlay');
+  if (form && overlay) {
+    form.addEventListener('submit', () => {
+      overlay.classList.add('active');
     });
+  }
 
-    activateTab(activeTab || 'input');
+  // 감량 그래프
+  const projectionData = {{ (report.weight_projection if report else []) | tojson }};
 
-    const form = document.getElementById('plan-form');
-    const overlay = document.getElementById('loading-overlay');
-    if (form && overlay) {
-      form.addEventListener('submit', () => {
-        overlay.classList.add('active');
-      });
-    }
-
-    const projectionData = {{ (report.weight_projection if report else []) | tojson }};
-    if (projectionData.length > 1) {
-      const ctx = document.getElementById('projectionChart');
-      if (!ctx) return;
+  if (Array.isArray(projectionData) && projectionData.length > 1) {
+    const canvas = document.getElementById('projectionChart');
+    if (canvas) {
+      const ctx = canvas.getContext('2d');
       const labels = projectionData.map(p => p.label);
       const weights = projectionData.map(p => p.weight);
+
       new Chart(ctx, {
         type: 'line',
         data: {
@@ -332,6 +342,7 @@
         }
       });
     }
-  </script>
+  }
+</script>
 </body>
 </html>

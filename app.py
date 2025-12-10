@@ -87,6 +87,7 @@ def _build_config() -> dict:
         "start_weight": _form_float("start_weight"),
         "current_weight": _form_float("current_weight"),
         "target_weight": _form_float("target_weight"),
+        "activity_level": request.form.get("activity_level", "baseline"),
         "loss_2_5": _form_float("loss_2_5"),
         "loss_5": _form_float("loss_5"),
         "loss_7_5": _form_float("loss_7_5"),
@@ -146,10 +147,18 @@ HTML_TEMPLATE = """
           <div><label>시작 체중(kg)</label><input type=\"number\" step=\"0.1\" name=\"start_weight\" value=\"{{ form_data.get('start_weight','') }}\" required /></div>
           <div><label>현재 체중(kg)</label><input type=\"number\" step=\"0.1\" name=\"current_weight\" value=\"{{ form_data.get('current_weight','') }}\" required /></div>
           <div><label>목표 체중(kg)</label><input type=\"number\" step=\"0.1\" name=\"target_weight\" value=\"{{ form_data.get('target_weight','') }}\" required /></div>
-          <div><label>2.5mg 예상 감량(4주)</label><input type=\"number\" step=\"0.1\" name=\"loss_2_5\" value=\"{{ form_data.get('loss_2_5','') }}\" placeholder=\"-4\" /></div>
-          <div><label>5mg 예상 감량(4주)</label><input type=\"number\" step=\"0.1\" name=\"loss_5\" value=\"{{ form_data.get('loss_5','') }}\" placeholder=\"-3\" /></div>
-          <div><label>7.5mg 예상 감량(4주)</label><input type=\"number\" step=\"0.1\" name=\"loss_7_5\" value=\"{{ form_data.get('loss_7_5','') }}\" placeholder=\"-2.5\" /></div>
-          <div><label>10mg 예상 감량(4주)</label><input type=\"number\" step=\"0.1\" name=\"loss_10\" value=\"{{ form_data.get('loss_10','') }}\" placeholder=\"-2.5\" /></div>
+          <div><label>2.5mg 예상 감량(초기 4주)</label><input type=\"number\" step=\"0.1\" name=\"loss_2_5\" value=\"{{ form_data.get('loss_2_5','') }}\" placeholder=\"-3.0\" /></div>
+          <div><label>5mg 예상 감량(초기 4주)</label><input type=\"number\" step=\"0.1\" name=\"loss_5\" value=\"{{ form_data.get('loss_5','') }}\" placeholder=\"-2.5\" /></div>
+          <div><label>7.5mg 예상 감량(초기 4주)</label><input type=\"number\" step=\"0.1\" name=\"loss_7_5\" value=\"{{ form_data.get('loss_7_5','') }}\" placeholder=\"-3.0\" /></div>
+          <div><label>10mg 예상 감량(초기 4주)</label><input type=\"number\" step=\"0.1\" name=\"loss_10\" value=\"{{ form_data.get('loss_10','') }}\" placeholder=\"-4.0\" /></div>
+          <div><label>운동/활동 수준</label>
+            <select name=\"activity_level\">
+              <option value=\"baseline\" {% if form_data.get('activity_level','baseline') == 'baseline' %}selected{% endif %}>기본(보수적)</option>
+              <option value=\"none\" {% if form_data.get('activity_level') == 'none' %}selected{% endif %}>운동 거의 안 함</option>
+              <option value=\"moderate\" {% if form_data.get('activity_level') == 'moderate' %}selected{% endif %}>운동 보통</option>
+              <option value=\"active\" {% if form_data.get('activity_level') == 'active' %}selected{% endif %}>운동 열심히</option>
+            </select>
+          </div>
           <div><label>골격근량(kg)</label><input type=\"number\" step=\"0.1\" name=\"skeletal_muscle\" value=\"{{ form_data.get('skeletal_muscle','') }}\" /></div>
           <div><label>체지방량(kg)</label><input type=\"number\" step=\"0.1\" name=\"fat_mass\" value=\"{{ form_data.get('fat_mass','') }}\" /></div>
           <div><label>내장지방 레벨</label><input type=\"number\" step=\"0.1\" name=\"visceral_level\" value=\"{{ form_data.get('visceral_level','') }}\" /></div>
@@ -160,6 +169,7 @@ HTML_TEMPLATE = """
           <div><label>유지 기간(개월)</label><input type=\"number\" step=\"1\" name=\"maintenance_months\" value=\"{{ form_data.get('maintenance_months','') }}\" placeholder=\"3\" /></div>
         </div>
         <p class=\"note\">필수 항목(시작/현재/목표 체중)만 입력하면 기본 가정으로 리포트를 생성합니다. 사용자 이름을 입력하면 데이터가 저장되고 이력이 표시됩니다.</p>
+        <p class=\"note\">기본 감량값은 현실적인 초기 4주 수치(2.5mg -3kg, 5mg -2.5kg, 7.5mg -3kg, 10mg -4kg)를 시작점으로 잡고, 2단계는 0.8배, 3단계는 0.6배로 자동 완화됩니다. 운동/활동 수준을 선택하면 7.5mg/10mg 초기값이 함께 조정됩니다. 모든 투약·감량 결정은 담당 의사와 상의해야 합니다.</p>
         <button type=\"submit\">리포트 생성 및 저장</button>
       </form>
     </section>

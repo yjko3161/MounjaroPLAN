@@ -82,6 +82,16 @@ def _form_float(name: str) -> float | None:
         return None
 
 
+def _form_int(name: str) -> int | None:
+    value = request.form.get(name)
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
 def _build_config() -> dict:
     return {
         "start_weight": _form_float("start_weight"),
@@ -92,6 +102,8 @@ def _build_config() -> dict:
         "loss_5": _form_float("loss_5"),
         "loss_7_5": _form_float("loss_7_5"),
         "loss_10": _form_float("loss_10"),
+        "period_weeks": _form_int("period_weeks"),
+        "weekly_dose_plan": request.form.get("weekly_dose_plan"),
         "skeletal_muscle": _form_float("skeletal_muscle"),
         "fat_mass": _form_float("fat_mass"),
         "visceral_level": _form_float("visceral_level"),

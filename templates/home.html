@@ -65,6 +65,8 @@
           <div><label>시작 체중(kg)</label><input type="number" step="0.1" name="start_weight" value="{{ form_data.get('start_weight','') }}" required /></div>
           <div><label>현재 체중(kg)</label><input type="number" step="0.1" name="current_weight" value="{{ form_data.get('current_weight','') }}" required /></div>
           <div><label>목표 체중(kg)</label><input type="number" step="0.1" name="target_weight" value="{{ form_data.get('target_weight','') }}" required /></div>
+          <div><label>예상 진행 기간(주)</label><input type="number" step="1" name="period_weeks" value="{{ form_data.get('period_weeks','') }}" placeholder="예: 24" /></div>
+          <div style="grid-column: span 2;"><label>주차별 실제 투여 용량 배열 (weekly_dose_plan)</label><textarea name="weekly_dose_plan" rows="3" placeholder="예: 2.5,2.5,5,5,7.5,7.5,5">{{ form_data.get('weekly_dose_plan','') }}</textarea><p class="note">콤마로 구분된 주차별 용량을 그대로 사용해 감량 추이를 계산합니다. 길이가 기간보다 짧으면 마지막 용량으로 채워집니다.</p></div>
           <div><label>2.5mg 예상 감량(초기 4주)</label><input type="number" step="0.1" name="loss_2_5" value="{{ form_data.get('loss_2_5','') }}" placeholder="-3.0" /></div>
           <div><label>5mg 예상 감량(초기 4주)</label><input type="number" step="0.1" name="loss_5" value="{{ form_data.get('loss_5','') }}" placeholder="-2.5" /></div>
           <div><label>7.5mg 예상 감량(초기 4주)</label><input type="number" step="0.1" name="loss_7_5" value="{{ form_data.get('loss_7_5','') }}" placeholder="-3.0" /></div>
@@ -132,26 +134,23 @@
       <div class="grid">
         <div class="card">
           <h2>예상 감량 추이</h2>
-          {% if report.plan_table %}
+          {% if report.weight_projection %}
             <table>
               <thead>
-                <tr><th>순서</th><th>페이즈</th><th>기간(주)</th><th>투여 용량(mg)</th><th>예상 감량(kg)</th><th>체중 변화(kg)</th><th>상태</th></tr>
+                <tr><th>주차</th><th>투여 용량(mg)</th><th>주차별 감량(kg)</th><th>예상 체중(kg)</th></tr>
               </thead>
               <tbody>
-                {% for row in report.plan_table %}
+                {% for row in report.weight_projection %}
                   <tr>
-                    <td>{{ loop.index }}</td>
-                    <td>{{ row.phase }}</td>
-                    <td>{{ row.weeks }}</td>
-                    <td>{{ row.dose }}</td>
-                    <td>{{ row.expected_loss }}</td>
-                    <td>{{ row.start_weight }} → {{ row.expected_weight }}</td>
-                    <td>{{ row.status }}</td>
+                    <td>{{ row.week_index }}</td>
+                    <td>{{ row.dose_mg }}</td>
+                    <td>{{ row.expected_loss_kg }}</td>
+                    <td>{{ row.expected_weight_kg }}</td>
                   </tr>
                 {% endfor %}
               </tbody>
             </table>
-            <p class="note">※ 위 감량 수치는 입력값과 단순 모델에 기반한 추정치이며, 개인차가 큽니다.</p>
+            <p class="note">※ 입력한 weekly_dose_plan을 그대로 사용한 단순 모델 추정치입니다.</p>
           {% else %}
             <p class="muted">감량 계획이 필요하지 않습니다.</p>
           {% endif %}
@@ -318,8 +317,8 @@
     const canvas = document.getElementById('projectionChart');
     if (canvas) {
       const ctx = canvas.getContext('2d');
-      const labels = projectionData.map(p => p.label);
-      const weights = projectionData.map(p => p.weight);
+      const labels = projectionData.map(p => p.label || `${p.week_index}주차`);
+      const weights = projectionData.map(p => p.expected_weight_kg ?? p.weight);
 
       new Chart(ctx, {
         type: 'line',

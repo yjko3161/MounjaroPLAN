@@ -8,6 +8,7 @@ HTML report string.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from math import ceil
 from typing import Any, Dict, List, Optional
 
@@ -47,6 +48,7 @@ class Config:
     maintenance_dose: float = 5.0
     maintenance_interval_weeks: int = 4
     maintenance_months: int = 3
+    start_date: Optional[str] = None
 
 
 @dataclass
@@ -54,6 +56,8 @@ class CostSummary:
     adaptation_cost: int
     maintenance_cost: int
     completed_adaptation_cost: int
+    maintenance_pens: int
+    maintenance_bundles: int
 
     @property
     def total_cost(self) -> int:
@@ -85,6 +89,7 @@ class PlanSummary:
     total_weeks: int
     upcoming_weeks: int
     projected_weight: float
+    total_weeks_with_maintenance: int
 
 
 @dataclass
@@ -145,6 +150,7 @@ def apply_defaults(config: Dict[str, Any]) -> Config:
         maintenance_dose=_safe_float(config.get("maintenance_dose", 5.0), 5.0),
         maintenance_interval_weeks=_safe_int(config.get("maintenance_interval_weeks", 4), 4),
         maintenance_months=_safe_int(config.get("maintenance_months", 3), 3),
+        start_date=(str(config.get("start_date") or "").strip() or None),
     )
 
 
@@ -239,8 +245,8 @@ def calculate_costs(cfg: Config, plan_rows: List[PlanRow], steps: List[PlanStep]
     )
 
     total_maintenance_weeks = cfg.maintenance_months * 4
-    shots_needed = ceil(total_maintenance_weeks / cfg.maintenance_interval_weeks)
-    bundles = ceil(shots_needed / 4)
+    shots_needed = ceil(total_maintenance_weeks / cfg.maintenance_interval_weeks) if total_maintenance_weeks else 0
+    bundles = ceil(shots_needed / 4) if shots_needed else 0
 
     if cfg.maintenance_dose <= 2.5:
         price_maint = 280000
@@ -255,6 +261,8 @@ def calculate_costs(cfg: Config, plan_rows: List[PlanRow], steps: List[PlanStep]
         adaptation_cost=adaptation_cost,
         maintenance_cost=maintenance_cost,
         completed_adaptation_cost=completed_adaptation_cost,
+        maintenance_pens=shots_needed,
+        maintenance_bundles=bundles,
     )
 
 
@@ -273,11 +281,12 @@ def summarize_plan(cfg: Config, plan_rows: List[PlanRow]) -> PlanSummary:
         total_weeks=total_weeks,
         upcoming_weeks=upcoming_weeks,
         projected_weight=round(projected_weight, 1),
+        total_weeks_with_maintenance=total_weeks + cfg.maintenance_months * 4,
     )
 
 
 def build_weight_projection(cfg: Config, plan_rows: List[PlanRow]) -> List[Dict[str, float]]:
-    """Create a simplified weight trajectory for charting."""
+    """Create a simplified weight trajectory for charting including 유지."""
 
     points: List[Dict[str, float]] = [{"label": "시작", "weight": round(cfg.start_weight, 1)}]
 
@@ -288,6 +297,10 @@ def build_weight_projection(cfg: Config, plan_rows: List[PlanRow]) -> List[Dict[
         points.append({"label": "현재", "weight": round(cfg.current_weight, 1)})
 
     points.append({"label": "목표", "weight": round(cfg.target_weight, 1)})
+
+    if cfg.maintenance_months > 0:
+        final_weight = plan_rows[-1].expected_weight if plan_rows else cfg.current_weight
+        points.append({"label": "유지 종료", "weight": round(final_weight, 1)})
 
     return points
 
@@ -384,7 +397,74 @@ def predict_body_composition(cfg: Config, plan_rows: List[PlanRow], steps: List[
             )
         )
 
+    if cfg.maintenance_months > 0 and rows:
+        rows.append(
+            BodyCompRow(
+                label="유지 종료",
+                weight=round(proj_weight, 1),
+                skeletal_muscle=round(proj_muscle, 1),
+                fat_mass=round(proj_fat, 1),
+                body_fat_percent=round(proj_fat / proj_weight * 100, 1) if proj_weight > 0 else 0,
+            )
+        )
+
     return rows
+
+
+def extend_plan_with_maintenance(cfg: Config, plan_rows: List[PlanRow]) -> List[PlanRow]:
+    """Return plan rows including a 유지 구간 for display purposes."""
+
+    if cfg.maintenance_months <= 0:
+        return plan_rows
+
+    display_rows = list(plan_rows)
+    maintenance_weeks = cfg.maintenance_months * 4
+    final_weight = plan_rows[-1].expected_weight if plan_rows else cfg.current_weight
+
+    display_rows.append(
+        PlanRow(
+            step_name=f"유지({cfg.maintenance_interval_weeks}주)",
+            weeks=maintenance_weeks,
+            dose=cfg.maintenance_dose,
+            phase="유지",
+            expected_loss=0.0,
+            expected_weight=round(final_weight, 1),
+            start_weight=round(final_weight, 1),
+            status="예정",
+        )
+    )
+
+    return display_rows
+
+
+def build_timeline(cfg: Config, plan_rows: List[PlanRow]) -> Dict[str, Any]:
+    """Compute 예상 종료일 및 남은 D-DAY based on start_date."""
+
+    if not cfg.start_date:
+        return {}
+
+    try:
+        start_date = datetime.fromisoformat(cfg.start_date).date()
+    except ValueError:
+        return {}
+
+    adaptation_weeks = sum(row.weeks for row in plan_rows)
+    maintenance_weeks = cfg.maintenance_months * 4
+    total_weeks = adaptation_weeks + maintenance_weeks
+
+    estimated_end = start_date + timedelta(weeks=total_weeks)
+    today = datetime.utcnow().date()
+    remaining_days = (estimated_end - today).days
+
+    maintenance_start = start_date + timedelta(weeks=adaptation_weeks)
+
+    return {
+        "start_date": start_date.isoformat(),
+        "maintenance_start_date": maintenance_start.isoformat(),
+        "estimated_end_date": estimated_end.isoformat(),
+        "remaining_days": remaining_days,
+        "total_weeks": total_weeks,
+    }
 
 
 def format_currency(value: int) -> str:
@@ -408,7 +488,7 @@ def _render_plan_table(plan_rows: List[PlanRow]) -> str:
       </thead>
       <tbody>{rows_html}</tbody>
     </table>
-    <p class='note'>※ 위 감량 수치는 입력값과 단순 모델에 기반한 추정치이며, 개인차가 큽니다.</p>
+    <p class='note'>※ 위 감량 수치는 입력값과 단순 모델에 기반한 추정치이며, 개인차가 큽니다. 유지 단계는 감량 없이 용량·기간을 누적 표기합니다.</p>
     """
 
 
@@ -420,6 +500,7 @@ def _render_cost_table(cost_summary: CostSummary) -> str:
         <tr><th>적응기 예정비용</th><td>{format_currency(cost_summary.upcoming_adaptation_cost)}원</td></tr>
         <tr><th>적응기 총비용</th><td>{format_currency(cost_summary.adaptation_cost)}원</td></tr>
         <tr><th>유지기 총비용</th><td>{format_currency(cost_summary.maintenance_cost)}원</td></tr>
+        <tr><th>유지기 펜 소요량</th><td>{cost_summary.maintenance_pens}펜 (4펜 묶음 {cost_summary.maintenance_bundles}개 기준)</td></tr>
         <tr class='total'><th>전체 합계</th><td><strong>{format_currency(cost_summary.total_cost)}원</strong></td></tr>
       </tbody>
     </table>
@@ -480,6 +561,9 @@ def generate_html(
     remaining_loss = max(cfg.current_weight - cfg.target_weight, 0)
     achieved_loss = max(cfg.start_weight - cfg.current_weight, 0)
 
+    display_rows = extend_plan_with_maintenance(cfg, plan_rows)
+    timeline = build_timeline(cfg, plan_rows)
+
     overview = f"""
     <div class='card'>
       <h2>개요</h2>
@@ -488,13 +572,14 @@ def generate_html(
       <p>1단계(초기 4주) 감량 가정: {' , '.join(f"{s.name} {s.loss:.1f}kg" for s in steps)}</p>
       <p>페이즈 약화 규칙: 2단계 x0.8, 3단계 x0.6 (초기&gt;중기&gt;후기로 완만해짐) / 활동 수준: {_activity_label(cfg.activity_level)}</p>
       <p>유지 플랜: {cfg.maintenance_start_dose}mg 이후 유지 시작, 유지 용량 {cfg.maintenance_dose}mg, {cfg.maintenance_interval_weeks}주 간격, {cfg.maintenance_months}개월</p>
+      {f"<p>시작일 {timeline['start_date']} 기준 유지 종료 예상일: {timeline['estimated_end_date']} (D{timeline['remaining_days']:+})</p>" if timeline else ''}
     </div>
     """
 
     plan_section = f"""
     <div class='card'>
       <h2>예상 감량 추이</h2>
-      {_render_plan_table(plan_rows)}
+      {_render_plan_table(display_rows)}
     </div>
     """
 
@@ -594,15 +679,17 @@ def generate_mounjaro_report(config: Dict[str, Any]) -> Dict[str, Any]:
     steps = build_steps(cfg)
 
     plan_rows = simulate_plan(cfg, steps)
+    display_plan_rows = extend_plan_with_maintenance(cfg, plan_rows)
     cost_summary = calculate_costs(cfg, plan_rows, steps)
     plan_summary = summarize_plan(cfg, plan_rows)
     body_comp_rows = predict_body_composition(cfg, plan_rows, steps)
     weight_projection = build_weight_projection(cfg, plan_rows)
+    timeline = build_timeline(cfg, plan_rows)
 
     html = generate_html(cfg, plan_rows, cost_summary, body_comp_rows, steps)
 
     return {
-        "plan_table": [row.__dict__ for row in plan_rows],
+        "plan_table": [row.__dict__ for row in display_plan_rows],
         "body_comp_table": [row.__dict__ for row in body_comp_rows],
         "plan_summary": plan_summary.__dict__,
         "weight_projection": weight_projection,
@@ -612,8 +699,18 @@ def generate_mounjaro_report(config: Dict[str, Any]) -> Dict[str, Any]:
             "completed_adaptation_cost": cost_summary.completed_adaptation_cost,
             "upcoming_adaptation_cost": cost_summary.upcoming_adaptation_cost,
             "total_cost": cost_summary.total_cost,
+            "maintenance_pens": cost_summary.maintenance_pens,
+            "maintenance_bundles": cost_summary.maintenance_bundles,
         },
         "total_cost": cost_summary.total_cost,
+        "maintenance_summary": {
+            "weeks": cfg.maintenance_months * 4,
+            "interval_weeks": cfg.maintenance_interval_weeks,
+            "dose": cfg.maintenance_dose,
+            "pens": cost_summary.maintenance_pens,
+            "bundles": cost_summary.maintenance_bundles,
+        },
+        "timeline": timeline,
         "html": html,
     }
 

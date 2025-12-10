@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>마운자로 감량 플랜 생성기</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root {
+      --bg: #f5f6fa;
+      --card: #fff;
+      --accent: #2563eb;
+      --muted: #6b7280;
+      --border: #e5e7eb;
+      --shadow: 0 10px 30px rgba(0,0,0,0.08);
+    }
+    * { box-sizing: border-box; }
+    body { font-family: 'Pretendard', 'Noto Sans KR', sans-serif; background: var(--bg); margin: 0; padding: 24px; color: #0f172a; }
+    h1 { text-align: center; margin-bottom: 16px; }
+    h2 { margin: 0 0 8px; }
+    .card { background: var(--card); padding: 16px 20px; box-shadow: var(--shadow); border-radius: 12px; }
+    .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+    label { display: block; font-weight: 700; margin-bottom: 6px; }
+    input, select { width: 100%; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+    button { margin-top: 16px; padding: 12px 16px; background: var(--accent); color: #fff; border: none; border-radius: 10px; cursor: pointer; font-weight: 800; width: 100%; }
+    button:hover { background: #1d4ed8; }
+    .note { color: var(--muted); font-size: 0.92em; margin-top: 4px; line-height: 1.4; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    th, td { border: 1px solid var(--border); padding: 8px; text-align: center; }
+    thead { background: #f3f4f6; }
+    tbody tr:nth-child(even) { background: #fafafa; }
+    .muted { color: var(--muted); }
+    .history-report { margin-top: 8px; background: #f9fafb; padding: 10px; border-radius: 6px; }
+    .tabs { display: flex; gap: 10px; margin-bottom: 12px; }
+    .tab-btn { padding: 10px 14px; border-radius: 999px; border: 1px solid var(--border); background: #fff; cursor: pointer; font-weight: 700; color: #374151; }
+    .tab-btn.active { background: #e0ecff; border-color: #bfdbfe; color: #1d4ed8; }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+    .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-bottom: 12px;}
+    .summary-card { border: 1px solid var(--border); border-radius: 12px; padding: 12px; background: #f8fafc; }
+    .summary-card strong { display: block; font-size: 1.2em; margin-top: 6px; }
+    .pill { display: inline-block; padding: 4px 8px; border-radius: 999px; background: #eef2ff; color: #4338ca; font-weight: 700; font-size: 0.85em; }
+    .loading-overlay { position: fixed; inset: 0; background: rgba(255,255,255,0.7); display: flex; align-items: center; justify-content: center; font-size: 1.1em; font-weight: 800; color: #1d4ed8; z-index: 50; backdrop-filter: blur(3px); display: none; }
+    .loading-overlay.active { display: flex; }
+    .chart-wrap { padding: 16px; background: #fff; border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); }
+  </style>
+</head>
+<body>
+  <div class="loading-overlay" id="loading-overlay">계산 중... 결과를 준비하고 있습니다</div>
+  <h1>마운자로 감량 플랜 생성기</h1>
+  <div class="tabs">
+    <button class="tab-btn" data-target="input">데이터 입력</button>
+    <button class="tab-btn" data-target="results">결과 요약</button>
+    <button class="tab-btn" data-target="reference">감량 참고</button>
+    <button class="tab-btn" data-target="disclaimer">주의/면책</button>
+    <button class="tab-btn" data-target="history">저장 이력</button>
+  </div>
+
+  <section class="tab-panel" id="tab-input">
+    <div class="card">
+      <h2>계산기</h2>
+      <form method="post" action="/generate" id="plan-form">
+        <div class="form-grid">
+          <div><label>사용자 이름</label><input type="text" name="username" value="{{ username }}" placeholder="보고서를 저장할 이름" /></div>
+          <div><label>시작 체중(kg)</label><input type="number" step="0.1" name="start_weight" value="{{ form_data.get('start_weight','') }}" required /></div>
+          <div><label>현재 체중(kg)</label><input type="number" step="0.1" name="current_weight" value="{{ form_data.get('current_weight','') }}" required /></div>
+          <div><label>목표 체중(kg)</label><input type="number" step="0.1" name="target_weight" value="{{ form_data.get('target_weight','') }}" required /></div>
+          <div><label>2.5mg 예상 감량(초기 4주)</label><input type="number" step="0.1" name="loss_2_5" value="{{ form_data.get('loss_2_5','') }}" placeholder="-3.0" /></div>
+          <div><label>5mg 예상 감량(초기 4주)</label><input type="number" step="0.1" name="loss_5" value="{{ form_data.get('loss_5','') }}" placeholder="-2.5" /></div>
+          <div><label>7.5mg 예상 감량(초기 4주)</label><input type="number" step="0.1" name="loss_7_5" value="{{ form_data.get('loss_7_5','') }}" placeholder="-3.0" /></div>
+          <div><label>10mg 예상 감량(초기 4주)</label><input type="number" step="0.1" name="loss_10" value="{{ form_data.get('loss_10','') }}" placeholder="-4.0" /></div>
+          <div><label>운동/활동 수준</label>
+            <select name="activity_level">
+              <option value="baseline" {% if form_data.get('activity_level','baseline') == 'baseline' %}selected{% endif %}>기본(보수적)</option>
+              <option value="none" {% if form_data.get('activity_level') == 'none' %}selected{% endif %}>운동 거의 안 함</option>
+              <option value="moderate" {% if form_data.get('activity_level') == 'moderate' %}selected{% endif %}>운동 보통</option>
+              <option value="active" {% if form_data.get('activity_level') == 'active' %}selected{% endif %}>운동 열심히</option>
+            </select>
+          </div>
+          <div><label>골격근량(kg)</label><input type="number" step="0.1" name="skeletal_muscle" value="{{ form_data.get('skeletal_muscle','') }}" /></div>
+          <div><label>체지방량(kg)</label><input type="number" step="0.1" name="fat_mass" value="{{ form_data.get('fat_mass','') }}" /></div>
+          <div><label>내장지방 레벨</label><input type="number" step="0.1" name="visceral_level" value="{{ form_data.get('visceral_level','') }}" /></div>
+          <div><label>WHR</label><input type="number" step="0.01" name="whr" value="{{ form_data.get('whr','') }}" /></div>
+          <div><label>유지 시작 용량(mg)</label><input type="number" step="0.1" name="maintenance_start_dose" value="{{ form_data.get('maintenance_start_dose','') }}" placeholder="5" /></div>
+          <div><label>유지 용량(mg)</label><input type="number" step="0.1" name="maintenance_dose" value="{{ form_data.get('maintenance_dose','') }}" placeholder="5" /></div>
+          <div><label>유지 주기(주)</label><input type="number" step="1" name="maintenance_interval_weeks" value="{{ form_data.get('maintenance_interval_weeks','') }}" placeholder="4" /></div>
+          <div><label>유지 기간(개월)</label><input type="number" step="1" name="maintenance_months" value="{{ form_data.get('maintenance_months','') }}" placeholder="3" /></div>
+          <div><label>플랜 시작일(YYYY-MM-DD)</label><input type="date" name="start_date" value="{{ form_data.get('start_date','') }}" /></div>
+        </div>
+        <p class="note">필수 항목(시작/현재/목표 체중)만 입력하면 기본 가정으로 리포트를 생성합니다. 사용자 이름을 입력하면 데이터가 저장되고 이력이 표시됩니다.</p>
+        <p class="note">기본 감량값은 현실적인 초기 4주 수치(2.5mg -3kg, 5mg -2.5kg, 7.5mg -3kg, 10mg -4kg)를 시작점으로 잡고, 2단계는 0.8배, 3단계는 0.6배로 자동 완화됩니다. 운동/활동 수준을 선택하면 7.5mg/10mg 초기값이 함께 조정됩니다. 모든 투약·감량 결정은 담당 의사와 상의해야 합니다.</p>
+        <button type="submit">리포트 생성 및 저장</button>
+      </form>
+    </div>
+  </section>
+
+  <section class="tab-panel" id="tab-results">
+    {% if report %}
+      <div class="summary-grid">
+        <div class="summary-card">
+          <span class="pill">남은 감량</span>
+          <strong>{{ report.plan_summary.remaining_loss }} kg</strong>
+          <p class="note">목표까지 남은 체중 감량</p>
+        </div>
+        <div class="summary-card">
+          <span class="pill">예상 기간</span>
+          <strong>{{ report.plan_summary.total_weeks_with_maintenance }} 주</strong>
+          <p class="note">적응 + 유지 주차 총합</p>
+        </div>
+        <div class="summary-card">
+          <span class="pill">총 비용</span>
+          <strong>{{ '{:,}'.format(report.cost_summary.total_cost) }}원</strong>
+          <p class="note">적응기 + 유지기 합산</p>
+        </div>
+        <div class="summary-card">
+          <span class="pill">예상 도달 체중</span>
+          <strong>{{ report.plan_summary.projected_weight }} kg</strong>
+          <p class="note">모든 단계 종료 시 체중</p>
+        </div>
+        <div class="summary-card">
+          <span class="pill">종료 예상일</span>
+          {% if report.timeline and report.timeline.estimated_end_date %}
+            <strong>{{ report.timeline.estimated_end_date }}</strong>
+            <p class="note">{{ report.timeline.start_date }} 시작, 남은 {{ report.timeline.remaining_days }}일 (D{{ report.timeline.remaining_days }})</p>
+          {% else %}
+            <strong>시작일 필요</strong>
+            <p class="note">플랜 시작일을 입력하면 종료일과 D-DAY가 계산됩니다.</p>
+          {% endif %}
+        </div>
+      </div>
+
+      <div class="grid">
+        <div class="card">
+          <h2>예상 감량 추이</h2>
+          {% if report.plan_table %}
+            <table>
+              <thead>
+                <tr><th>순서</th><th>페이즈</th><th>기간(주)</th><th>투여 용량(mg)</th><th>예상 감량(kg)</th><th>체중 변화(kg)</th><th>상태</th></tr>
+              </thead>
+              <tbody>
+                {% for row in report.plan_table %}
+                  <tr>
+                    <td>{{ loop.index }}</td>
+                    <td>{{ row.phase }}</td>
+                    <td>{{ row.weeks }}</td>
+                    <td>{{ row.dose }}</td>
+                    <td>{{ row.expected_loss }}</td>
+                    <td>{{ row.start_weight }} → {{ row.expected_weight }}</td>
+                    <td>{{ row.status }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+            <p class="note">※ 위 감량 수치는 입력값과 단순 모델에 기반한 추정치이며, 개인차가 큽니다.</p>
+          {% else %}
+            <p class="muted">감량 계획이 필요하지 않습니다.</p>
+          {% endif %}
+        </div>
+        <div class="card">
+          <h2>비용 요약</h2>
+          <table>
+            <tbody>
+              <tr><th>적응기 누적비용</th><td>{{ '{:,}'.format(report.cost_summary.completed_adaptation_cost) }}원</td></tr>
+              <tr><th>적응기 예정비용</th><td>{{ '{:,}'.format(report.cost_summary.upcoming_adaptation_cost) }}원</td></tr>
+              <tr><th>적응기 총비용</th><td>{{ '{:,}'.format(report.cost_summary.adaptation_cost) }}원</td></tr>
+              <tr><th>유지기 총비용</th><td>{{ '{:,}'.format(report.cost_summary.maintenance_cost) }}원</td></tr>
+              <tr><th>유지기 펜 소요량</th><td>{{ report.cost_summary.maintenance_pens }}펜 (4펜 묶음 {{ report.cost_summary.maintenance_bundles }}개)</td></tr>
+              <tr><th>전체 합계</th><td><strong>{{ '{:,}'.format(report.cost_summary.total_cost) }}원</strong></td></tr>
+            </tbody>
+          </table>
+          <p class="note">현재 체중을 기준으로 이미 지나간 단계는 누적 비용에, 앞으로 필요한 단계는 예정 비용에 더해 총합을 계산했습니다.</p>
+        </div>
+        <div class="card">
+          <h2>유지 플랜 요약</h2>
+          <table>
+            <tbody>
+              <tr><th>유지 용량</th><td>{{ report.maintenance_summary.dose }} mg</td></tr>
+              <tr><th>유지 주기</th><td>{{ report.maintenance_summary.interval_weeks }} 주마다 1펜</td></tr>
+              <tr><th>유지 기간</th><td>{{ report.maintenance_summary.weeks }} 주 (약 {{ report.maintenance_summary.weeks // 4 }}개월)</td></tr>
+              <tr><th>총 펜 수</th><td>{{ report.maintenance_summary.pens }}펜 (4펜 묶음 {{ report.maintenance_summary.bundles }}개)</td></tr>
+            </tbody>
+          </table>
+          {% if report.timeline and report.timeline.maintenance_start_date %}
+            <p class="note">적응기 종료 예상일: {{ report.timeline.maintenance_start_date }}, 유지 종료 예상일: {{ report.timeline.estimated_end_date }}</p>
+          {% else %}
+            <p class="note">시작일을 입력하면 유지 시작/종료 시점을 계산합니다.</p>
+          {% endif %}
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>감량 그래프</h2>
+        <div class="chart-wrap">
+          <canvas id="projectionChart" height="120"></canvas>
+        </div>
+      </div>
+
+      <div class="card">
+        {{ report_html|safe }}
+      </div>
+    {% else %}
+      <div class="card">
+        <p class="muted">아직 생성된 리포트가 없습니다. 입력 탭에서 값을 입력해 주세요.</p>
+      </div>
+    {% endif %}
+  </section>
+
+  <section class="tab-panel" id="tab-reference">
+    <div class="card">
+      <h2>초기~중기 감량 참고치</h2>
+      <p class="note">SURMOUNT 그래프와 실사용 경험을 단순 요약한 참고 범위입니다. 계산기는 1→2→3단계로 갈수록 자동 완화 규칙을 적용합니다.</p>
+      <table>
+        <thead><tr><th>기간</th><th>보편적 감량 경향</th></tr></thead>
+        <tbody>
+          <tr><td>1~4주</td><td>-2 ~ -4kg</td></tr>
+          <tr><td>5~8주</td><td>-2 ~ -5kg</td></tr>
+          <tr><td>9~12주</td><td>-3 ~ -6kg</td></tr>
+          <tr><td>12주 누적</td><td>-6% ~ -12% (약 -6 ~ -12kg)</td></tr>
+        </tbody>
+      </table>
+      <table>
+        <thead><tr><th>7.5mg</th><th>운동 안 함</th><th>운동 보통</th><th>운동 열심히</th></tr></thead>
+        <tbody>
+          <tr><td>1단계(1~4주)</td><td>-2.0kg</td><td>-3.5kg</td><td>-5.0kg</td></tr>
+          <tr><td>2단계(5~8주)</td><td>-1.5kg</td><td>-3.0kg</td><td>-4.0kg</td></tr>
+          <tr><td>3단계(9~12주)</td><td>-1.0kg</td><td>-2.0kg</td><td>-3.0kg</td></tr>
+          <tr><td>3개월 누적</td><td colspan="3">현실 범위: -6 ~ -12kg</td></tr>
+        </tbody>
+      </table>
+      <table>
+        <thead><tr><th>10mg</th><th>운동 안 함</th><th>운동 보통</th><th>운동 열심히</th></tr></thead>
+        <tbody>
+          <tr><td>1단계(1~4주)</td><td>-3.0kg</td><td>-4.5kg</td><td>-7.0kg</td></tr>
+          <tr><td>2단계(5~8주)</td><td>-2.0kg</td><td>-3.0kg</td><td>-5.0kg</td></tr>
+          <tr><td>3단계(9~12주)</td><td>-1.0kg</td><td>-2.0kg</td><td>-3.0kg</td></tr>
+          <tr><td>3개월 누적</td><td colspan="3">현실 범위: -8 ~ -15kg (운동 병행 시 -12~-15kg 흔함)</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="tab-panel" id="tab-disclaimer">
+    <div class="card">
+      <h2>주의/면책</h2>
+      <p class="note">이 리포트는 사용자가 입력한 값과 단순 수학적 모델에 기반한 '예상치'입니다. 실제 체중 변화, 혈당·당뇨 상태, 인바디 수치는 개인에 따라 크게 달라질 수 있습니다.</p>
+      <p class="note">마운자로(티르제파타이드)의 용량 조절, 투여 시작·유지·중단, 다른 약과의 병용 여부 등 모든 의료적 결정은 반드시 담당 의사와 상의하여 결정해야 합니다. 이 프로그램은 의료적 진단이나 처방을 제공하지 않으며, 정보를 정리하고 시각화하는 도구입니다.</p>
+      <p class="note">기본 감량 가정은 SURMOUNT 연구(10mg 평균 약 -19.5%/72주 등)를 보수적으로 환산한 값입니다. 개인별 식단·운동·질환 상태에 따라 실제 감량 속도는 크게 달라질 수 있습니다.</p>
+    </div>
+  </section>
+
+  <section class="tab-panel" id="tab-history">
+    <div class="card">
+      <h2>사용자별 이력</h2>
+      <p class="note">최근 20개의 리포트가 저장됩니다. 사용자 이름을 입력한 뒤 리포트를 생성하면 해당 이름으로 묶어 저장됩니다.</p>
+      {% if username %}
+        <p><strong>{{ username }}</strong>님의 저장된 리포트</p>
+      {% endif %}
+      {% if history %}
+        <table>
+          <thead><tr><th>생성 시각(UTC)</th><th>시작/현재/목표(kg)</th><th>총비용(원)</th><th>상세</th></tr></thead>
+          <tbody>
+            {% for item in history %}
+              <tr>
+                <td>{{ item.timestamp }}</td>
+                <td>{{ item.start_weight }} → {{ item.current_weight }} → {{ item.target_weight }}</td>
+                <td>{{ '{:,}'.format(item.total_cost or 0) }}</td>
+                <td>
+                  <details>
+                    <summary>리포트 보기</summary>
+                    <div class="history-report">{{ item.report_html|safe }}</div>
+                  </details>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p class="muted">표시할 저장 이력이 없습니다. 사용자 이름을 입력하고 리포트를 생성해 보세요.</p>
+      {% endif %}
+    </div>
+  </section>
+
+  <script>
+    const tabButtons = document.querySelectorAll('.tab-btn');
+    const tabPanels = document.querySelectorAll('.tab-panel');
+    const activeTab = '{{ active_tab }}';
+
+    function activateTab(target) {
+      tabButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.target === target));
+      tabPanels.forEach(panel => panel.classList.toggle('active', panel.id === `tab-${target}`));
+    }
+
+    tabButtons.forEach(btn => {
+      btn.addEventListener('click', () => activateTab(btn.dataset.target));
+    });
+
+    activateTab(activeTab || 'input');
+
+    const form = document.getElementById('plan-form');
+    const overlay = document.getElementById('loading-overlay');
+    if (form && overlay) {
+      form.addEventListener('submit', () => {
+        overlay.classList.add('active');
+      });
+    }
+
+    const projectionData = {{ (report.weight_projection if report else []) | tojson }};
+    if (projectionData.length > 1) {
+      const ctx = document.getElementById('projectionChart');
+      if (!ctx) return;
+      const labels = projectionData.map(p => p.label);
+      const weights = projectionData.map(p => p.weight);
+      new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [{
+            label: '예상 체중(kg)',
+            data: weights,
+            borderColor: '#2563eb',
+            backgroundColor: 'rgba(37, 99, 235, 0.15)',
+            fill: true,
+            tension: 0.3
+          }]
+        },
+        options: {
+          plugins: { legend: { display: false } },
+          scales: {
+            y: { beginAtZero: false }
+          }
+        }
+      });
+    }
+  </script>
+</body>
+</html>

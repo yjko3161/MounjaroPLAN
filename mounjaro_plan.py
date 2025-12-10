@@ -190,15 +190,17 @@ def _phase_label(index: int) -> str:
 
 
 def simulate_plan(cfg: Config, steps: List[PlanStep]) -> List[PlanRow]:
-    """Simulate the adaptation phase weight changes with phase decay."""
+    """Simulate 감량을 목표 체중까지 이어가도록 반복합니다."""
 
     if cfg.target_weight >= cfg.start_weight:
         return []
 
     current = cfg.start_weight
     plan_rows: List[PlanRow] = []
+    step_index = 0
 
-    for step_index, step in enumerate(steps):
+    while current > cfg.target_weight:
+        step = steps[step_index] if step_index < len(steps) else steps[-1]
         phase_idx = min(step_index, len(PHASE_DECAY) - 1)
         phase_loss = abs(step.loss) * PHASE_DECAY[phase_idx]
 
@@ -227,10 +229,11 @@ def simulate_plan(cfg: Config, steps: List[PlanStep]) -> List[PlanRow]:
             )
         )
 
-        current = new_weight
-
-        if current <= cfg.target_weight:
+        if possible_loss <= 0:
             break
+
+        current = new_weight
+        step_index += 1
 
     return plan_rows
 
@@ -285,24 +288,49 @@ def summarize_plan(cfg: Config, plan_rows: List[PlanRow]) -> PlanSummary:
     )
 
 
-def build_weight_projection(cfg: Config, plan_rows: List[PlanRow]) -> List[Dict[str, float]]:
-    """Create a simplified weight trajectory for charting including 유지."""
-
-    points: List[Dict[str, float]] = [{"label": "시작", "weight": round(cfg.start_weight, 1)}]
-
-    for row in plan_rows:
-        points.append({"label": f"{row.step_name} 종료", "weight": row.expected_weight})
+def build_weight_projection(cfg: Config, plan_rows: List[PlanRow]) -> List[Dict[str, Any]]:
+    """Create 1주일 단위 예상 체중 변화(유지 포함)."""
 
     if not plan_rows:
-        points.append({"label": "현재", "weight": round(cfg.current_weight, 1)})
+        return []
 
-    points.append({"label": "목표", "weight": round(cfg.target_weight, 1)})
+    try:
+        start_date = datetime.fromisoformat(cfg.start_date).date() if cfg.start_date else None
+    except ValueError:
+        start_date = None
 
-    if cfg.maintenance_months > 0:
-        final_weight = plan_rows[-1].expected_weight if plan_rows else cfg.current_weight
-        points.append({"label": "유지 종료", "weight": round(final_weight, 1)})
+    projection: List[Dict[str, Any]] = []
+    current_weight = cfg.start_weight
+    week_counter = 0
 
-    return points
+    start_label = start_date.isoformat() if start_date else "시작"
+    projection.append({"label": start_label, "weight": round(current_weight, 1)})
+
+    for row in plan_rows:
+        weekly_loss = row.expected_loss / row.weeks if row.weeks else 0
+        for _ in range(row.weeks):
+            week_counter += 1
+            current_weight = max(cfg.target_weight, round(current_weight - weekly_loss, 2))
+
+            if start_date:
+                label_date = start_date + timedelta(weeks=week_counter)
+                label = f"{label_date.isoformat()}"
+            else:
+                label = f"{week_counter}주차"
+
+            projection.append({"label": label, "weight": round(current_weight, 1)})
+
+    maintenance_weeks = cfg.maintenance_months * 4
+    for _ in range(maintenance_weeks):
+        week_counter += 1
+        if start_date:
+            label_date = start_date + timedelta(weeks=week_counter)
+            label = f"{label_date.isoformat()}"
+        else:
+            label = f"{week_counter}주차"
+        projection.append({"label": label, "weight": round(current_weight, 1)})
+
+    return projection
 
 
 def predict_body_composition(cfg: Config, plan_rows: List[PlanRow], steps: List[PlanStep]) -> List[BodyCompRow]:
@@ -458,11 +486,19 @@ def build_timeline(cfg: Config, plan_rows: List[PlanRow]) -> Dict[str, Any]:
 
     maintenance_start = start_date + timedelta(weeks=adaptation_weeks)
 
+    if remaining_days > 0:
+        d_day = f"D-{remaining_days}"
+    elif remaining_days == 0:
+        d_day = "D-DAY"
+    else:
+        d_day = f"D+{abs(remaining_days)}"
+
     return {
         "start_date": start_date.isoformat(),
         "maintenance_start_date": maintenance_start.isoformat(),
         "estimated_end_date": estimated_end.isoformat(),
         "remaining_days": remaining_days,
+        "d_day": d_day,
         "total_weeks": total_weeks,
     }
 
@@ -572,7 +608,7 @@ def generate_html(
       <p>1단계(초기 4주) 감량 가정: {' , '.join(f"{s.name} {s.loss:.1f}kg" for s in steps)}</p>
       <p>페이즈 약화 규칙: 2단계 x0.8, 3단계 x0.6 (초기&gt;중기&gt;후기로 완만해짐) / 활동 수준: {_activity_label(cfg.activity_level)}</p>
       <p>유지 플랜: {cfg.maintenance_start_dose}mg 이후 유지 시작, 유지 용량 {cfg.maintenance_dose}mg, {cfg.maintenance_interval_weeks}주 간격, {cfg.maintenance_months}개월</p>
-      {f"<p>시작일 {timeline['start_date']} 기준 유지 종료 예상일: {timeline['estimated_end_date']} (D{timeline['remaining_days']:+})</p>" if timeline else ''}
+      {f"<p>시작일 {timeline['start_date']} 기준 유지 종료 예상일: {timeline['estimated_end_date']} ({timeline['d_day']})</p>" if timeline else ''}
     </div>
     """
 

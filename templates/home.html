@@ -120,8 +120,8 @@
         <div class="summary-card">
           <span class="pill">종료 예상일</span>
           {% if report.timeline and report.timeline.estimated_end_date %}
-            <strong>{{ report.timeline.estimated_end_date }}</strong>
-            <p class="note">{{ report.timeline.start_date }} 시작, 남은 {{ report.timeline.remaining_days }}일 (D{{ report.timeline.remaining_days }})</p>
+            <strong>{{ report.timeline.estimated_end_date }} ({{ report.timeline.d_day }})</strong>
+            <p class="note">{{ report.timeline.start_date }} 시작, 남은 {{ report.timeline.remaining_days }}일</p>
           {% else %}
             <strong>시작일 필요</strong>
             <p class="note">플랜 시작일을 입력하면 종료일과 D-DAY가 계산됩니다.</p>
@@ -181,7 +181,7 @@
             </tbody>
           </table>
           {% if report.timeline and report.timeline.maintenance_start_date %}
-            <p class="note">적응기 종료 예상일: {{ report.timeline.maintenance_start_date }}, 유지 종료 예상일: {{ report.timeline.estimated_end_date }}</p>
+            <p class="note">적응기 종료 예상일: {{ report.timeline.maintenance_start_date }}, 유지 종료 예상일: {{ report.timeline.estimated_end_date }} ({{ report.timeline.d_day }})</p>
           {% else %}
             <p class="note">시작일을 입력하면 유지 시작/종료 시점을 계산합니다.</p>
           {% endif %}
@@ -193,6 +193,7 @@
         <div class="chart-wrap">
           <canvas id="projectionChart" height="120"></canvas>
         </div>
+        <p class="note">시작일을 입력하면 해당 날짜부터 1주 단위로 예상 체중을 표시하며, 입력하지 않아도 주차별 감량 추이를 보여줍니다.</p>
       </div>
 
       <div class="card">
@@ -203,6 +204,49 @@
         <p class="muted">아직 생성된 리포트가 없습니다. 입력 탭에서 값을 입력해 주세요.</p>
       </div>
     {% endif %}
+  </section>
+
+  <section class="tab-panel" id="tab-reference">
+    <div class="card">
+      <h2>초기~중기 감량 참고치</h2>
+      <p class="note">SURMOUNT 그래프와 실사용 경험을 단순 요약한 참고 범위입니다. 계산기는 1→2→3단계로 갈수록 자동 완화 규칙을 적용합니다.</p>
+      <table>
+        <thead><tr><th>기간</th><th>보편적 감량 경향</th></tr></thead>
+        <tbody>
+          <tr><td>1~4주</td><td>-2 ~ -4kg</td></tr>
+          <tr><td>5~8주</td><td>-2 ~ -5kg</td></tr>
+          <tr><td>9~12주</td><td>-3 ~ -6kg</td></tr>
+          <tr><td>12주 누적</td><td>-6% ~ -12% (약 -6 ~ -12kg)</td></tr>
+        </tbody>
+      </table>
+      <table>
+        <thead><tr><th>7.5mg</th><th>운동 안 함</th><th>운동 보통</th><th>운동 열심히</th></tr></thead>
+        <tbody>
+          <tr><td>1단계(1~4주)</td><td>-2.0kg</td><td>-3.5kg</td><td>-5.0kg</td></tr>
+          <tr><td>2단계(5~8주)</td><td>-1.5kg</td><td>-3.0kg</td><td>-4.0kg</td></tr>
+          <tr><td>3단계(9~12주)</td><td>-1.0kg</td><td>-2.0kg</td><td>-3.0kg</td></tr>
+          <tr><td>3개월 누적</td><td colspan="3">현실 범위: -6 ~ -12kg</td></tr>
+        </tbody>
+      </table>
+      <table>
+        <thead><tr><th>10mg</th><th>운동 안 함</th><th>운동 보통</th><th>운동 열심히</th></tr></thead>
+        <tbody>
+          <tr><td>1단계(1~4주)</td><td>-3.0kg</td><td>-4.5kg</td><td>-7.0kg</td></tr>
+          <tr><td>2단계(5~8주)</td><td>-2.0kg</td><td>-3.0kg</td><td>-5.0kg</td></tr>
+          <tr><td>3단계(9~12주)</td><td>-1.0kg</td><td>-2.0kg</td><td>-3.0kg</td></tr>
+          <tr><td>3개월 누적</td><td colspan="3">현실 범위: -8 ~ -15kg (운동 병행 시 -12~-15kg 흔함)</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="tab-panel" id="tab-disclaimer">
+    <div class="card">
+      <h2>주의/면책</h2>
+      <p class="note">이 리포트는 사용자가 입력한 값과 단순 수학적 모델에 기반한 '예상치'입니다. 실제 체중 변화, 혈당·당뇨 상태, 인바디 수치는 개인에 따라 크게 달라질 수 있습니다.</p>
+      <p class="note">마운자로(티르제파타이드)의 용량 조절, 투여 시작·유지·중단, 다른 약과의 병용 여부 등 모든 의료적 결정은 반드시 담당 의사와 상의하여 결정해야 합니다. 이 프로그램은 의료적 진단이나 처방을 제공하지 않으며, 정보를 정리하고 시각화하는 도구입니다.</p>
+      <p class="note">기본 감량 가정은 SURMOUNT 연구(10mg 평균 약 -19.5%/72주 등)를 보수적으로 환산한 값입니다. 개인별 식단·운동·질환 상태에 따라 실제 감량 속도는 크게 달라질 수 있습니다.</p>
+    </div>
   </section>
 
   <section class="tab-panel" id="tab-history">
@@ -238,45 +282,35 @@
   </section>
 
   <script>
-  const tabButtons = document.querySelectorAll('.tab-btn');
-  const tabPanels = document.querySelectorAll('.tab-panel');
-  const activeTab = '{{ active_tab }}';
+    const tabButtons = document.querySelectorAll('.tab-btn');
+    const tabPanels = document.querySelectorAll('.tab-panel');
+    const activeTab = '{{ active_tab }}';
 
-  function activateTab(target) {
-    tabButtons.forEach(btn =>
-      btn.classList.toggle('active', btn.dataset.target === target)
-    );
-    tabPanels.forEach(panel =>
-      panel.classList.toggle('active', panel.id === `tab-${target}`)
-    );
-  }
+    function activateTab(target) {
+      tabButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.target === target));
+      tabPanels.forEach(panel => panel.classList.toggle('active', panel.id === `tab-${target}`));
+    }
 
-  tabButtons.forEach(btn => {
-    btn.addEventListener('click', () => activateTab(btn.dataset.target));
-  });
-
-  // 기본 활성 탭
-  activateTab(activeTab || 'input');
-
-  // 폼 제출 시 로딩 오버레이
-  const form = document.getElementById('plan-form');
-  const overlay = document.getElementById('loading-overlay');
-  if (form && overlay) {
-    form.addEventListener('submit', () => {
-      overlay.classList.add('active');
+    tabButtons.forEach(btn => {
+      btn.addEventListener('click', () => activateTab(btn.dataset.target));
     });
-  }
 
-  // 감량 그래프
-  const projectionData = {{ (report.weight_projection if report else []) | tojson }};
+    activateTab(activeTab || 'input');
 
-  if (Array.isArray(projectionData) && projectionData.length > 1) {
-    const canvas = document.getElementById('projectionChart');
-    if (canvas) {
-      const ctx = canvas.getContext('2d');
+    const form = document.getElementById('plan-form');
+    const overlay = document.getElementById('loading-overlay');
+    if (form && overlay) {
+      form.addEventListener('submit', () => {
+        overlay.classList.add('active');
+      });
+    }
+
+    const projectionData = {{ (report.weight_projection if report else []) | tojson }};
+    if (projectionData.length > 1) {
+      const ctx = document.getElementById('projectionChart');
+      if (!ctx) return;
       const labels = projectionData.map(p => p.label);
       const weights = projectionData.map(p => p.weight);
-
       new Chart(ctx, {
         type: 'line',
         data: {
@@ -298,9 +332,6 @@
         }
       });
     }
-  }
-</script>
-
-
+  </script>
 </body>
 </html>

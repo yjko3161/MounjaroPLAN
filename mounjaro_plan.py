@@ -35,10 +35,10 @@ class Config:
     start_weight: float
     current_weight: float
     target_weight: float
-    loss_2_5: float = -4.0
-    loss_5: float = -3.0
-    loss_7_5: float = -3.0
-    loss_10: float = -4.0
+    loss_2_5: Optional[float] = None
+    loss_5: Optional[float] = None
+    loss_7_5: Optional[float] = None
+    loss_10: Optional[float] = None
     activity_level: str = "baseline"  # baseline | none | moderate | active
     skeletal_muscle: Optional[float] = None
     fat_mass: Optional[float] = None
@@ -120,6 +120,13 @@ def _safe_int(value: Any, default: int) -> int:
         return default
 
 
+def _optional_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def apply_defaults(config: Dict[str, Any]) -> Config:
     """Normalize user input and apply defaults for optional fields."""
 
@@ -137,10 +144,10 @@ def apply_defaults(config: Dict[str, Any]) -> Config:
         start_weight=start_weight,
         current_weight=current_weight,
         target_weight=target_weight,
-        loss_2_5=_safe_float(config.get("loss_2_5"), -3.0),
-        loss_5=_safe_float(config.get("loss_5"), -2.5),
-        loss_7_5=_safe_float(config.get("loss_7_5"), -3.0),
-        loss_10=_safe_float(config.get("loss_10"), -4.0),
+        loss_2_5=_optional_float(config.get("loss_2_5")),
+        loss_5=_optional_float(config.get("loss_5")),
+        loss_7_5=_optional_float(config.get("loss_7_5")),
+        loss_10=_optional_float(config.get("loss_10")),
         activity_level=str(config.get("activity_level") or "baseline"),
         skeletal_muscle=config.get("skeletal_muscle"),
         fat_mass=config.get("fat_mass"),
@@ -169,11 +176,14 @@ def build_steps(cfg: Config) -> List[PlanStep]:
 
     activity_defaults = _activity_adjusted_losses()
 
+    def _loss_value(key: str, user_value: Optional[float]) -> float:
+        return user_value if user_value is not None else activity_defaults[key]
+
     return [
-        PlanStep("2.5mg", 2.5, cfg.loss_2_5 or activity_defaults["2.5mg"], 280000),
-        PlanStep("5mg", 5.0, cfg.loss_5 or activity_defaults["5mg"], 380000),
-        PlanStep("7.5mg", 7.5, cfg.loss_7_5 or activity_defaults["7.5mg"], 549000),
-        PlanStep("10mg", 10.0, cfg.loss_10 or activity_defaults["10mg"], 549000),
+        PlanStep("2.5mg", 2.5, _loss_value("2.5mg", cfg.loss_2_5), 280000),
+        PlanStep("5mg", 5.0, _loss_value("5mg", cfg.loss_5), 380000),
+        PlanStep("7.5mg", 7.5, _loss_value("7.5mg", cfg.loss_7_5), 549000),
+        PlanStep("10mg", 10.0, _loss_value("10mg", cfg.loss_10), 549000),
     ]
 
 

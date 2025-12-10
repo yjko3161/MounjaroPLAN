@@ -77,6 +77,17 @@ class PlanRow:
 
 
 @dataclass
+class PlanSummary:
+    """Aggregated view of the adaptation phase."""
+
+    achieved_loss: float
+    remaining_loss: float
+    total_weeks: int
+    upcoming_weeks: int
+    projected_weight: float
+
+
+@dataclass
 class BodyCompRow:
     label: str
     weight: float
@@ -182,9 +193,6 @@ def simulate_plan(cfg: Config, steps: List[PlanStep]) -> List[PlanRow]:
     plan_rows: List[PlanRow] = []
 
     for step_index, step in enumerate(steps):
-        if step.dose > cfg.maintenance_start_dose:
-            break
-
         phase_idx = min(step_index, len(PHASE_DECAY) - 1)
         phase_loss = abs(step.loss) * PHASE_DECAY[phase_idx]
 
@@ -250,7 +258,41 @@ def calculate_costs(cfg: Config, plan_rows: List[PlanRow], steps: List[PlanStep]
     )
 
 
-def predict_body_composition(cfg: Config, plan_rows: List[PlanRow]) -> List[BodyCompRow]:
+def summarize_plan(cfg: Config, plan_rows: List[PlanRow]) -> PlanSummary:
+    """Aggregate remaining 감량, 기간, 도달 예상 체중."""
+
+    achieved_loss = max(cfg.start_weight - cfg.current_weight, 0)
+    remaining_loss = max(cfg.current_weight - cfg.target_weight, 0)
+    total_weeks = sum(row.weeks for row in plan_rows)
+    upcoming_weeks = sum(row.weeks for row in plan_rows if row.status in {"예정", "진행 중"})
+    projected_weight = plan_rows[-1].expected_weight if plan_rows else cfg.current_weight
+
+    return PlanSummary(
+        achieved_loss=round(achieved_loss, 1),
+        remaining_loss=round(remaining_loss, 1),
+        total_weeks=total_weeks,
+        upcoming_weeks=upcoming_weeks,
+        projected_weight=round(projected_weight, 1),
+    )
+
+
+def build_weight_projection(cfg: Config, plan_rows: List[PlanRow]) -> List[Dict[str, float]]:
+    """Create a simplified weight trajectory for charting."""
+
+    points: List[Dict[str, float]] = [{"label": "시작", "weight": round(cfg.start_weight, 1)}]
+
+    for row in plan_rows:
+        points.append({"label": f"{row.step_name} 종료", "weight": row.expected_weight})
+
+    if not plan_rows:
+        points.append({"label": "현재", "weight": round(cfg.current_weight, 1)})
+
+    points.append({"label": "목표", "weight": round(cfg.target_weight, 1)})
+
+    return points
+
+
+def predict_body_composition(cfg: Config, plan_rows: List[PlanRow], steps: List[PlanStep]) -> List[BodyCompRow]:
     """Estimate body composition changes if InBody inputs are available."""
 
     if cfg.skeletal_muscle is None or cfg.fat_mass is None:
@@ -284,23 +326,60 @@ def predict_body_composition(cfg: Config, plan_rows: List[PlanRow]) -> List[Body
         ),
     ]
 
+    proj_weight = cfg.start_weight
+    proj_fat = start_fat
+    proj_muscle = start_muscle
+
+    # Use existing plan rows first (status-aware), then extend with remaining steps
+    # so that 7.5mg/10mg projections are available even if 목표 체중으로 인해
+    # 본 계획이 일찍 종료되더라도 체성분 예측은 시작 체중 기준으로 이어간다.
+    extended_steps: List[PlanRow] = list(plan_rows)
+
+    projected_chain_weight = cfg.start_weight
     for row in plan_rows:
+        projected_chain_weight -= row.expected_loss
+
+    if len(plan_rows) < len(steps):
+        for idx in range(len(plan_rows), len(steps)):
+            step = steps[idx]
+            phase_idx = min(idx, len(PHASE_DECAY) - 1)
+            projected_loss = abs(step.loss) * PHASE_DECAY[phase_idx]
+
+            start_weight = max(round(projected_chain_weight, 1), 0)
+            projected_weight = max(round(projected_chain_weight - projected_loss, 1), 0)
+
+            extended_steps.append(
+                PlanRow(
+                    step_name=step.name,
+                    weeks=4,
+                    dose=step.dose,
+                    phase=_phase_label(phase_idx),
+                    expected_loss=round(projected_loss, 1),
+                    expected_weight=projected_weight,
+                    start_weight=start_weight,
+                    status="예정",
+                )
+            )
+
+            projected_chain_weight -= projected_loss
+
+    for row in extended_steps:
         weight_loss_step = row.expected_loss
         fat_loss_step = weight_loss_step * FAT_RATIO
         muscle_loss_step = weight_loss_step * MUSCLE_RATIO
 
-        curr_weight -= weight_loss_step
-        curr_fat -= fat_loss_step
-        curr_muscle -= muscle_loss_step
+        proj_weight -= weight_loss_step
+        proj_fat -= fat_loss_step
+        proj_muscle -= muscle_loss_step
 
-        body_fat_percent = round(curr_fat / curr_weight * 100, 1) if curr_weight > 0 else 0
+        body_fat_percent = round(proj_fat / proj_weight * 100, 1) if proj_weight > 0 else 0
 
         rows.append(
             BodyCompRow(
                 label=f"{row.step_name} 종료",
-                weight=round(curr_weight, 1),
-                skeletal_muscle=round(curr_muscle, 1),
-                fat_mass=round(curr_fat, 1),
+                weight=round(proj_weight, 1),
+                skeletal_muscle=round(proj_muscle, 1),
+                fat_mass=round(proj_fat, 1),
                 body_fat_percent=body_fat_percent,
             )
         )
@@ -516,13 +595,17 @@ def generate_mounjaro_report(config: Dict[str, Any]) -> Dict[str, Any]:
 
     plan_rows = simulate_plan(cfg, steps)
     cost_summary = calculate_costs(cfg, plan_rows, steps)
-    body_comp_rows = predict_body_composition(cfg, plan_rows)
+    plan_summary = summarize_plan(cfg, plan_rows)
+    body_comp_rows = predict_body_composition(cfg, plan_rows, steps)
+    weight_projection = build_weight_projection(cfg, plan_rows)
 
     html = generate_html(cfg, plan_rows, cost_summary, body_comp_rows, steps)
 
     return {
         "plan_table": [row.__dict__ for row in plan_rows],
         "body_comp_table": [row.__dict__ for row in body_comp_rows],
+        "plan_summary": plan_summary.__dict__,
+        "weight_projection": weight_projection,
         "cost_summary": {
             "adaptation_cost": cost_summary.adaptation_cost,
             "maintenance_cost": cost_summary.maintenance_cost,

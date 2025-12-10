@@ -1,0 +1,424 @@
+"""Mounjaro (tirzepatide) weight loss plan generator.
+
+This module exposes a single entry point `generate_mounjaro_report` that consumes a
+configuration dictionary and returns a structured payload containing the simulated
+plan, predicted body composition changes (when possible), cost summary, and a full
+HTML report string.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from math import ceil
+from typing import Any, Dict, List, Optional
+
+
+# Default model parameters for body composition estimation
+FAT_RATIO = 0.75  # kg fat lost per kg total loss
+MUSCLE_RATIO = 0.05  # kg muscle lost per kg total loss
+
+
+@dataclass
+class PlanStep:
+    """Represents a single 4-week dose step."""
+
+    name: str
+    dose: float
+    loss: float
+    price: int
+
+
+@dataclass
+class Config:
+    """Normalized user input with defaults applied."""
+
+    start_weight: float
+    current_weight: float
+    target_weight: float
+    loss_2_5: float = -4.0
+    loss_5: float = -3.0
+    loss_7_5: float = -2.5
+    loss_10: float = -2.5
+    skeletal_muscle: Optional[float] = None
+    fat_mass: Optional[float] = None
+    visceral_level: Optional[float] = None
+    whr: Optional[float] = None
+    maintenance_start_dose: float = 5.0
+    maintenance_dose: float = 5.0
+    maintenance_interval_weeks: int = 4
+    maintenance_months: int = 3
+
+
+@dataclass
+class CostSummary:
+    adaptation_cost: int
+    maintenance_cost: int
+
+    @property
+    def total_cost(self) -> int:
+        return self.adaptation_cost + self.maintenance_cost
+
+
+@dataclass
+class PlanRow:
+    step_name: str
+    weeks: int
+    dose: float
+    expected_loss: float
+    expected_weight: float
+
+
+@dataclass
+class BodyCompRow:
+    label: str
+    weight: float
+    skeletal_muscle: float
+    fat_mass: float
+    body_fat_percent: float
+
+
+class InvalidConfigError(ValueError):
+    """Raised when the provided configuration is missing mandatory fields."""
+
+
+def _safe_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value: Any, default: int) -> int:
+    try:
+        candidate = int(value)
+        return candidate if candidate > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def apply_defaults(config: Dict[str, Any]) -> Config:
+    """Normalize user input and apply defaults for optional fields."""
+
+    if not isinstance(config, dict):
+        raise InvalidConfigError("config must be a dictionary")
+
+    try:
+        start_weight = float(config["start_weight"])
+        current_weight = float(config["current_weight"])
+        target_weight = float(config["target_weight"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise InvalidConfigError("start_weight, current_weight, target_weight are required and must be numbers") from exc
+
+    return Config(
+        start_weight=start_weight,
+        current_weight=current_weight,
+        target_weight=target_weight,
+        loss_2_5=_safe_float(config.get("loss_2_5"), -4.0),
+        loss_5=_safe_float(config.get("loss_5"), -3.0),
+        loss_7_5=_safe_float(config.get("loss_7_5"), -2.5),
+        loss_10=_safe_float(config.get("loss_10"), -2.5),
+        skeletal_muscle=config.get("skeletal_muscle"),
+        fat_mass=config.get("fat_mass"),
+        visceral_level=config.get("visceral_level"),
+        whr=config.get("whr"),
+        maintenance_start_dose=_safe_float(config.get("maintenance_start_dose", 5.0), 5.0),
+        maintenance_dose=_safe_float(config.get("maintenance_dose", 5.0), 5.0),
+        maintenance_interval_weeks=_safe_int(config.get("maintenance_interval_weeks", 4), 4),
+        maintenance_months=_safe_int(config.get("maintenance_months", 3), 3),
+    )
+
+
+def build_steps(cfg: Config) -> List[PlanStep]:
+    """Create the ordered list of plan steps with defaults."""
+
+    return [
+        PlanStep("2.5mg", 2.5, cfg.loss_2_5 or -4.0, 280000),
+        PlanStep("5mg", 5.0, cfg.loss_5 or -3.0, 380000),
+        PlanStep("7.5mg", 7.5, cfg.loss_7_5 or -2.5, 549000),
+        PlanStep("10mg", 10.0, cfg.loss_10 or -2.5, 549000),
+    ]
+
+
+def simulate_plan(cfg: Config, steps: List[PlanStep]) -> List[PlanRow]:
+    """Simulate the adaptation phase weight changes."""
+
+    # If the target is not below the start weight, return an empty plan.
+    if cfg.target_weight >= cfg.start_weight:
+        return []
+
+    current = cfg.start_weight
+    plan_rows: List[PlanRow] = []
+
+    for step in steps:
+        if step.dose > cfg.maintenance_start_dose:
+            break
+
+        if current <= cfg.target_weight:
+            possible_loss = 0.0
+        else:
+            possible_loss = min(abs(step.loss), max(current - cfg.target_weight, 0))
+
+        new_weight = current - possible_loss
+
+        plan_rows.append(
+            PlanRow(
+                step_name=step.name,
+                weeks=4,
+                dose=step.dose,
+                expected_loss=round(possible_loss, 1),
+                expected_weight=round(new_weight, 1),
+            )
+        )
+
+        current = new_weight
+
+        if current <= cfg.target_weight:
+            break
+
+    return plan_rows
+
+
+def calculate_costs(cfg: Config, plan_rows: List[PlanRow], steps: List[PlanStep]) -> CostSummary:
+    """Calculate adaptation and maintenance costs."""
+
+    # Adaptation cost equals the number of executed plan rows multiplied by their respective prices
+    price_lookup = {step.name: step.price for step in steps}
+    adaptation_cost = sum(price_lookup.get(row.step_name, 0) for row in plan_rows)
+
+    total_maintenance_weeks = cfg.maintenance_months * 4
+    shots_needed = ceil(total_maintenance_weeks / cfg.maintenance_interval_weeks)
+    bundles = ceil(shots_needed / 4)
+
+    if cfg.maintenance_dose <= 2.5:
+        price_maint = 280000
+    elif cfg.maintenance_dose <= 5:
+        price_maint = 380000
+    else:
+        price_maint = 549000
+
+    maintenance_cost = bundles * price_maint if bundles > 0 else 0
+
+    return CostSummary(adaptation_cost=adaptation_cost, maintenance_cost=maintenance_cost)
+
+
+def predict_body_composition(cfg: Config, plan_rows: List[PlanRow]) -> List[BodyCompRow]:
+    """Estimate body composition changes if InBody inputs are available."""
+
+    if cfg.skeletal_muscle is None or cfg.fat_mass is None:
+        return []
+
+    try:
+        curr_weight = float(cfg.current_weight)
+        curr_fat = float(cfg.fat_mass)
+        curr_muscle = float(cfg.skeletal_muscle)
+    except (TypeError, ValueError):
+        return []
+
+    rows: List[BodyCompRow] = [
+        BodyCompRow(
+            label="현재",
+            weight=round(curr_weight, 1),
+            skeletal_muscle=round(curr_muscle, 1),
+            fat_mass=round(curr_fat, 1),
+            body_fat_percent=round(curr_fat / curr_weight * 100, 1) if curr_weight > 0 else 0,
+        )
+    ]
+
+    for row in plan_rows:
+        weight_loss_step = row.expected_loss
+        fat_loss_step = weight_loss_step * FAT_RATIO
+        muscle_loss_step = weight_loss_step * MUSCLE_RATIO
+
+        curr_weight -= weight_loss_step
+        curr_fat -= fat_loss_step
+        curr_muscle -= muscle_loss_step
+
+        body_fat_percent = round(curr_fat / curr_weight * 100, 1) if curr_weight > 0 else 0
+
+        rows.append(
+            BodyCompRow(
+                label=f"{row.step_name} 종료",
+                weight=round(curr_weight, 1),
+                skeletal_muscle=round(curr_muscle, 1),
+                fat_mass=round(curr_fat, 1),
+                body_fat_percent=body_fat_percent,
+            )
+        )
+
+    return rows
+
+
+def format_currency(value: int) -> str:
+    return format(int(value), ",")
+
+
+def _render_plan_table(plan_rows: List[PlanRow]) -> str:
+    if not plan_rows:
+        return "<p>감량 계획이 필요하지 않습니다.</p>"
+
+    rows_html = "".join(
+        f"<tr><td>{idx + 1}</td><td>{row.weeks}</td><td>{row.dose:.1f}</td>"
+        f"<td>{row.expected_loss:.1f}</td><td>{row.expected_weight:.1f}</td></tr>"
+        for idx, row in enumerate(plan_rows)
+    )
+    return f"""
+    <table>
+      <thead>
+        <tr><th>단계</th><th>기간(주)</th><th>투여 용량(mg)</th><th>예상 감량(kg)</th><th>예상 체중(kg)</th></tr>
+      </thead>
+      <tbody>{rows_html}</tbody>
+    </table>
+    <p class='note'>※ 위 감량 수치는 입력값과 단순 모델에 기반한 추정치이며, 개인차가 큽니다.</p>
+    """
+
+
+def _render_cost_table(cost_summary: CostSummary) -> str:
+    return f"""
+    <table>
+      <tbody>
+        <tr><th>적응기 총비용</th><td>{format_currency(cost_summary.adaptation_cost)}원</td></tr>
+        <tr><th>유지기 총비용</th><td>{format_currency(cost_summary.maintenance_cost)}원</td></tr>
+        <tr class='total'><th>전체 합계</th><td><strong>{format_currency(cost_summary.total_cost)}원</strong></td></tr>
+      </tbody>
+    </table>
+    """
+
+
+def _render_body_comp_table(rows: List[BodyCompRow], cfg: Config) -> str:
+    if not rows:
+        return ""
+
+    rows_html = "".join(
+        f"<tr><td>{r.label}</td><td>{r.weight:.1f}</td><td>{r.skeletal_muscle:.1f}</td>"
+        f"<td>{r.fat_mass:.1f}</td><td>{r.body_fat_percent:.1f}%</td></tr>" for r in rows
+    )
+
+    visceral_note = ""
+    if cfg.visceral_level is not None and rows:
+        fat_loss_total = max(rows[0].fat_mass - rows[-1].fat_mass, 0)
+        visceral_note = (
+            f"체지방량이 약 {fat_loss_total:.1f}kg 감소하면 내장지방 레벨은 대략 1~2 정도 감소할 가능성이 있습니다. (추정치)"
+        )
+
+    whr_note = "체지방률 감소에 따라 WHR도 약간 감소하는 경향이 있으며, 실제 값은 인바디로 확인해야 합니다."
+
+    return f"""
+    <div class='card'>
+      <h2>체성분 예측</h2>
+      <table>
+        <thead>
+          <tr><th>지점</th><th>체중(kg)</th><th>골격근량(kg)</th><th>체지방량(kg)</th><th>체지방률(%)</th></tr>
+        </thead>
+        <tbody>{rows_html}</tbody>
+      </table>
+      <p class='note'>모든 체성분 값은 단순 비율 모델에 따른 추정치이며, 실제 인바디 측정값과 다를 수 있습니다.</p>
+      <p class='note'>{visceral_note}</p>
+      <p class='note'>{whr_note}</p>
+    </div>
+    """
+
+
+def generate_html(
+    cfg: Config, plan_rows: List[PlanRow], cost_summary: CostSummary, body_comp_rows: List[BodyCompRow]
+) -> str:
+    overview = f"""
+    <div class='card'>
+      <h2>개요</h2>
+      <p>시작 체중: {cfg.start_weight} kg / 현재 체중: {cfg.current_weight} kg / 목표 체중: {cfg.target_weight} kg</p>
+      <p>감량 가정 (4주 예상 감량): 2.5mg {cfg.loss_2_5} kg, 5mg {cfg.loss_5} kg, 7.5mg {cfg.loss_7_5} kg, 10mg {cfg.loss_10} kg</p>
+      <p>유지 플랜: {cfg.maintenance_start_dose}mg 이후 유지 시작, 유지 용량 {cfg.maintenance_dose}mg, {cfg.maintenance_interval_weeks}주 간격, {cfg.maintenance_months}개월</p>
+    </div>
+    """
+
+    plan_section = f"""
+    <div class='card'>
+      <h2>예상 감량 추이</h2>
+      {_render_plan_table(plan_rows)}
+    </div>
+    """
+
+    cost_section = f"""
+    <div class='card'>
+      <h2>비용 요약</h2>
+      {_render_cost_table(cost_summary)}
+    </div>
+    """
+
+    body_comp_section = _render_body_comp_table(body_comp_rows, cfg)
+
+    disclaimer = """
+    <div class='card'>
+      <h2>주의/면책</h2>
+      <p class='note'>※ 이 리포트는 사용자가 입력한 값과 단순 수학적 모델에 기반한 '예상치'입니다. 실제 체중 변화, 혈당·당뇨 상태, 인바디 수치는 개인에 따라 크게 달라질 수 있습니다. 마운자로(티르제파타이드)의 용량 조절, 투여 시작·유지·중단, 다른 약과의 병용 여부 등 모든 의료적 결정은 반드시 담당 의사와 상의하여 결정해야 합니다. 이 프로그램은 의료적 진단이나 처방을 제공하지 않으며, 단지 정보를 정리하고 시각화하는 도구입니다.</p>
+    </div>
+    """
+
+    style = """
+    <style>
+      body { font-family: 'Pretendard', 'Noto Sans KR', sans-serif; background: #f5f6fa; margin: 0; padding: 20px; }
+      h1 { text-align: center; }
+      .card { background: #fff; padding: 16px 20px; margin-bottom: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); border-radius: 8px; }
+      table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+      th, td { border: 1px solid #e5e7eb; padding: 8px; text-align: center; }
+      thead { background: #f3f4f6; }
+      tbody tr:nth-child(even) { background: #fafafa; }
+      .note { color: #6b7280; font-size: 0.9em; margin-top: 6px; }
+      .total th, .total td { font-weight: 700; background: #fff7ed; }
+    </style>
+    """
+
+    body = f"""
+    <body>
+      <h1>마운자로 감량 플랜 리포트</h1>
+      {overview}
+      {plan_section}
+      {cost_section}
+      {body_comp_section}
+      {disclaimer}
+    </body>
+    """
+
+    return f"<!DOCTYPE html><html lang='ko'><head><meta charset='UTF-8'><title>마운자로 감량 플랜 리포트</title>{style}</head>{body}</html>"
+
+
+def generate_mounjaro_report(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Generate the Mounjaro weight loss plan and HTML report.
+
+    Args:
+        config: Input configuration dictionary.
+
+    Returns:
+        A dictionary containing plan_table, body_comp_table, cost_summary, total_cost, and html.
+    """
+
+    cfg = apply_defaults(config)
+    steps = build_steps(cfg)
+
+    plan_rows = simulate_plan(cfg, steps)
+    cost_summary = calculate_costs(cfg, plan_rows, steps)
+    body_comp_rows = predict_body_composition(cfg, plan_rows)
+
+    html = generate_html(cfg, plan_rows, cost_summary, body_comp_rows)
+
+    return {
+        "plan_table": [row.__dict__ for row in plan_rows],
+        "body_comp_table": [row.__dict__ for row in body_comp_rows],
+        "cost_summary": {
+            "adaptation_cost": cost_summary.adaptation_cost,
+            "maintenance_cost": cost_summary.maintenance_cost,
+            "total_cost": cost_summary.total_cost,
+        },
+        "total_cost": cost_summary.total_cost,
+        "html": html,
+    }
+
+
+if __name__ == "__main__":
+    example_config = {
+        "start_weight": 95,
+        "current_weight": 92,
+        "target_weight": 80,
+        "skeletal_muscle": 35,
+        "fat_mass": 30,
+    }
+    report = generate_mounjaro_report(example_config)
+    print(report)

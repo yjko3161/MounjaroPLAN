@@ -58,6 +58,7 @@ class CostSummary:
     adaptation_cost: int
     maintenance_cost: int
     completed_adaptation_cost: int
+    dose_pens: Dict[str, int]
     maintenance_pens: int
     maintenance_bundles: int
 
@@ -461,10 +462,20 @@ def calculate_costs(cfg: Config, plan_rows: List[PlanRow], steps: List[PlanStep]
     """Calculate adaptation and maintenance costs including completed history."""
 
     price_lookup = {step.name: step.price for step in steps}
-    adaptation_cost = sum(price_lookup.get(row.step_name, 0) for row in plan_rows)
-    completed_adaptation_cost = sum(
-        price_lookup.get(row.step_name, 0) for row in plan_rows if row.status in {"완료", "진행 중"}
-    )
+
+    dose_pens: Dict[str, int] = {}
+    dose_costs: Dict[str, int] = {}
+    completed_adaptation_cost = 0
+
+    for row in plan_rows:
+        pens = max(int(row.weeks), 0)
+        dose_pens[row.step_name] = dose_pens.get(row.step_name, 0) + pens
+        unit_price = price_lookup.get(row.step_name, 0)
+        dose_costs[row.step_name] = dose_costs.get(row.step_name, 0) + pens * unit_price
+        if row.status in {"완료", "진행 중"}:
+            completed_adaptation_cost += pens * unit_price
+
+    adaptation_cost = sum(dose_costs.values())
 
     total_maintenance_weeks = cfg.maintenance_months * 4
     shots_needed = ceil(total_maintenance_weeks / cfg.maintenance_interval_weeks) if total_maintenance_weeks else 0
@@ -483,6 +494,7 @@ def calculate_costs(cfg: Config, plan_rows: List[PlanRow], steps: List[PlanStep]
         adaptation_cost=adaptation_cost,
         maintenance_cost=maintenance_cost,
         completed_adaptation_cost=completed_adaptation_cost,
+        dose_pens=dose_pens,
         maintenance_pens=shots_needed,
         maintenance_bundles=bundles,
     )
@@ -690,38 +702,38 @@ def predict_body_composition(cfg: Config, plan_rows: List[PlanRow], steps: List[
     proj_fat = start_fat
     proj_muscle = start_muscle
 
-    # Use existing plan rows first (status-aware), then extend with remaining steps
-    # so that 7.5mg/10mg projections are available even if 목표 체중으로 인해
-    # 본 계획이 일찍 종료되더라도 체성분 예측은 시작 체중 기준으로 이어간다.
     extended_steps: List[PlanRow] = list(plan_rows)
 
-    projected_chain_weight = cfg.start_weight
-    for row in plan_rows:
-        projected_chain_weight -= row.expected_loss
+    # weekly_dose_plan이 있을 땐 사용자가 입력한 용량 시나리오만으로 체성분을 예측한다.
+    # 별도 입력이 없을 때만 기본 용량 체인을 끝까지 붙인다.
+    if not cfg.weekly_dose_plan:
+        projected_chain_weight = cfg.start_weight
+        for row in plan_rows:
+            projected_chain_weight -= row.expected_loss
 
-    if len(plan_rows) < len(steps):
-        for idx in range(len(plan_rows), len(steps)):
-            step = steps[idx]
-            phase_idx = min(idx, len(PHASE_DECAY) - 1)
-            projected_loss = abs(step.loss) * PHASE_DECAY[phase_idx]
+        if len(plan_rows) < len(steps):
+            for idx in range(len(plan_rows), len(steps)):
+                step = steps[idx]
+                phase_idx = min(idx, len(PHASE_DECAY) - 1)
+                projected_loss = abs(step.loss) * PHASE_DECAY[phase_idx]
 
-            start_weight = max(round(projected_chain_weight, 1), 0)
-            projected_weight = max(round(projected_chain_weight - projected_loss, 1), 0)
+                start_weight = max(round(projected_chain_weight, 1), 0)
+                projected_weight = max(round(projected_chain_weight - projected_loss, 1), 0)
 
-            extended_steps.append(
-                PlanRow(
-                    step_name=step.name,
-                    weeks=4,
-                    dose=step.dose,
-                    phase=_phase_label(phase_idx),
-                    expected_loss=round(projected_loss, 1),
-                    expected_weight=projected_weight,
-                    start_weight=start_weight,
-                    status="예정",
+                extended_steps.append(
+                    PlanRow(
+                        step_name=step.name,
+                        weeks=4,
+                        dose=step.dose,
+                        phase=_phase_label(phase_idx),
+                        expected_loss=round(projected_loss, 1),
+                        expected_weight=projected_weight,
+                        start_weight=start_weight,
+                        status="예정",
+                    )
                 )
-            )
 
-            projected_chain_weight -= projected_loss
+                projected_chain_weight -= projected_loss
 
     for row in extended_steps:
         weight_loss_step = row.expected_loss
@@ -850,7 +862,39 @@ def _render_projection_table(weight_projection: List[Dict[str, Any]]) -> str:
     """
 
 
+def _dose_price_lookup(dose_label: str) -> int:
+    """Return price per pen for a given dose label (e.g., '2.5mg')."""
+
+    normalized = dose_label.lower().replace("mg", "").strip()
+    try:
+        dose_value = float(normalized)
+    except ValueError:
+        return 0
+
+    if dose_value <= 2.5:
+        return 280_000
+    if dose_value <= 5:
+        return 380_000
+    return 549_000
+
+
 def _render_cost_table(cost_summary: CostSummary) -> str:
+    dose_breakdown = ""
+    if cost_summary.dose_pens:
+        sorted_doses = sorted(cost_summary.dose_pens.items(), key=lambda item: float(str(item[0]).replace("mg", "").strip()))
+        dose_rows = "".join(
+            f"<tr><td>{dose}</td><td>{pens}펜</td><td>{format_currency(pens * _dose_price_lookup(dose))}원</td></tr>"
+            for dose, pens in sorted_doses
+        )
+        dose_breakdown = f"""
+        <p class='note'>적응기 용량별 펜 사용량</p>
+        <table>
+          <thead><tr><th>용량</th><th>펜 수</th><th>해당 비용</th></tr></thead>
+          <tbody>{dose_rows}</tbody>
+        </table>
+        <p class='note'>* 2.5mg 280,000원 / 5mg 380,000원 / 7.5mg·10mg 549,000원 단가를 주차 수(=펜 수)에 곱해 총비용을 계산합니다.</p>
+        """
+
     return f"""
     <table>
       <tbody>
@@ -862,6 +906,7 @@ def _render_cost_table(cost_summary: CostSummary) -> str:
         <tr class='total'><th>전체 합계</th><td><strong>{format_currency(cost_summary.total_cost)}원</strong></td></tr>
       </tbody>
     </table>
+    {dose_breakdown}
     """
 
 
@@ -1058,6 +1103,7 @@ def generate_mounjaro_report(config: Dict[str, Any]) -> Dict[str, Any]:
             "completed_adaptation_cost": cost_summary.completed_adaptation_cost,
             "upcoming_adaptation_cost": cost_summary.upcoming_adaptation_cost,
             "total_cost": cost_summary.total_cost,
+            "dose_pens": cost_summary.dose_pens,
             "maintenance_pens": cost_summary.maintenance_pens,
             "maintenance_bundles": cost_summary.maintenance_bundles,
         },

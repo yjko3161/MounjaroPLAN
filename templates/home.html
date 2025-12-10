@@ -80,6 +80,12 @@
           <div><label>예상 진행 기간(주)</label><input type="number" step="1" name="period_weeks" value="{{ form_data.get('period_weeks','24') }}" placeholder="예: 24" /></div>
           <div style="grid-column: span 2;">
             <label>주차별 실제 투여 용량</label>
+            <select id="weekly-plan-template" style="margin-bottom: 10px;">
+              <option value="">직접 선택 (주차별/용량별 셀렉트 사용)</option>
+              <option value="2.5,2.5,2.5,2.5,5,5,5,5,7.5,7.5,7.5,7.5,10,10,10,10,5">2.5×4주 → 5×4주 → 7.5×4주 → 10×4주 → 5mg 유지</option>
+              <option value="2.5,2.5,2.5,2.5,5,5,5,5,7.5,7.5,7.5,7.5,10,10,10,10">2.5×4주 → 5×4주 → 7.5×4주 → 10×4주</option>
+              <option value="2.5,2.5,5,5,5,5,7.5,7.5,7.5,7.5">2.5×2주 → 5×4주 → 7.5×4주</option>
+            </select>
             <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); margin-bottom: 10px;">
               {% for dose in ['2.5','5','7.5','10','12.5','15'] %}
                 <div>
@@ -214,6 +220,26 @@
               <tr><th>전체 합계</th><td><strong>{{ '{:,}'.format(report.cost_summary.total_cost) }}원</strong></td></tr>
             </tbody>
           </table>
+          {% if report.cost_summary.dose_pens %}
+            <p class="note">용량별 적응기 펜 사용량</p>
+            <table>
+              <thead><tr><th>용량</th><th>펜 수(주)</th><th>해당 비용</th></tr></thead>
+              <tbody>
+                {% for dose, pens in report.cost_summary.dose_pens.items() %}
+                  {% set dose_val = (dose|string).replace('mg','').strip()|float %}
+                  {% if dose_val <= 2.5 %}
+                    {% set unit_price = 280000 %}
+                  {% elif dose_val <= 5 %}
+                    {% set unit_price = 380000 %}
+                  {% else %}
+                    {% set unit_price = 549000 %}
+                  {% endif %}
+                  <tr><td>{{ dose }}</td><td>{{ pens }}펜</td><td>{{ '{:,}'.format(unit_price * pens) }}원</td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+            <p class="note">주차 수(=펜 수)에 용량별 단가를 곱해 적응기 비용에 반영합니다.</p>
+          {% endif %}
           <p class="note">현재 체중을 기준으로 이미 지나간 단계는 누적 비용에, 앞으로 필요한 단계는 예정 비용에 더해 총합을 계산했습니다.</p>
         </div>
         <div class="card">
@@ -338,6 +364,7 @@
   const periodWeeksInput = document.querySelector('input[name="period_weeks"]');
   const currentWeekIndicator = document.getElementById('current-week-indicator');
   const doseCountSelects = document.querySelectorAll('.dose-count-select');
+  const weeklyPlanTemplate = document.getElementById('weekly-plan-template');
 
   function activateTab(target) {
     tabButtons.forEach(btn =>
@@ -363,6 +390,35 @@
     const values = Array.from(weeklySelects).map(select => select.value || '5');
     weeklyPlanHidden.value = values.join(',');
     updateDoseCountSelectorsFromPlan(values);
+  }
+
+  function applyTemplate(templateValue) {
+    if (!templateValue || weeklySelects.length === 0) return;
+    const tokens = templateValue.split(',').map(v => v.trim()).filter(Boolean);
+    if (tokens.length === 0) return;
+
+    const totalWeeks = parseInt(periodWeeksInput?.value || `${weeklySelects.length}`, 10);
+    const weeks = Number.isFinite(totalWeeks) && totalWeeks > 0 ? totalWeeks : weeklySelects.length;
+
+    const plan = [];
+    for (let i = 0; i < weeks; i += 1) {
+      const value = tokens[i] ?? tokens[tokens.length - 1];
+      plan.push(value);
+    }
+
+    weeklySelects.forEach((select, idx) => {
+      select.value = plan[idx] ?? plan[plan.length - 1] ?? '5';
+    });
+
+    syncWeeklyPlanString();
+  }
+
+  function syncTemplateSelector() {
+    if (!weeklyPlanTemplate) return;
+    const planValue = weeklyPlanHidden?.value || '';
+    const options = Array.from(weeklyPlanTemplate.options);
+    const match = options.find(option => option.value === planValue);
+    weeklyPlanTemplate.value = match ? match.value : '';
   }
 
   function updateDoseCountSelectorsFromPlan(planValues) {
@@ -468,8 +524,12 @@
   startDateInput?.addEventListener('change', calculateCurrentWeek);
   startDateInput?.addEventListener('blur', calculateCurrentWeek);
   periodWeeksInput?.addEventListener('input', calculateCurrentWeek);
+  weeklyPlanTemplate?.addEventListener('change', (event) => {
+    applyTemplate(event.target.value);
+  });
 
   syncWeeklyPlanString();
+  syncTemplateSelector();
   applyDoseCountsToWeeklyPlan();
   calculateCurrentWeek();
 

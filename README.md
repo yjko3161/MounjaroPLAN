@@ -14,4 +14,7 @@
    ```
 3. 브라우저에서 `http://localhost:8000` 에 접속 후 입력 폼을 채워 리포트를 생성하세요. JSON API가 필요하면 `/api/report` 엔드포인트에 POST 요청을 보내면 됩니다.
 
-https://github.com/yjko3161/MounjaroPLAN/blob/main/%EA%B2%B0%EA%B3%BC%ED%99%94%EB%A9%B4.png
+<p align="center">
+  <img src="https://raw.githubusercontent.com/yjko3161/MounjaroPLAN/main/%EC%9E%85%EB%A0%A5%ED%99%94%EB%A9%B4.png" width="45%" />
+  <img src="https://raw.githubusercontent.com/yjko3161/MounjaroPLAN/main/%EA%B2%B0%EA%B3%BC%ED%99%94%EB%A9%B4.png" width="45%" />
+</p>

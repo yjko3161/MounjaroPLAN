@@ -98,6 +98,7 @@ def _build_config() -> dict:
         "current_weight": _form_float("current_weight"),
         "target_weight": _form_float("target_weight"),
         "activity_level": request.form.get("activity_level", "baseline"),
+        "auto_titration": request.form.get("auto_titration") == "on",
         "loss_2_5": _form_float("loss_2_5"),
         "loss_5": _form_float("loss_5"),
         "loss_7_5": _form_float("loss_7_5"),
@@ -116,8 +117,42 @@ def _build_config() -> dict:
     }
 
 
+def _plan_context(form_data: Dict[str, Any]) -> Dict[str, Any]:
+    weekly_plan_raw = (form_data or {}).get("weekly_dose_plan", "")
+    weekly_plan_list = [value.strip() for value in weekly_plan_raw.split(",") if value.strip()]
+
+    period_weeks = (form_data.get("period_weeks") or len(weekly_plan_list) or 24)
+    try:
+        period_weeks_int = int(period_weeks)
+        period_weeks = period_weeks_int if period_weeks_int > 0 else 24
+    except (TypeError, ValueError):
+        period_weeks = 24
+
+    if weekly_plan_list:
+        last_value = weekly_plan_list[-1]
+        weekly_plan_list.extend([last_value] * (period_weeks - len(weekly_plan_list)))
+    else:
+        weekly_plan_list = ["5"] * period_weeks
+
+    plan_string = ",".join(weekly_plan_list)
+    weekly_plan_raw = weekly_plan_raw or plan_string
+
+    dose_counts: Dict[str, int] = {}
+    for value in weekly_plan_list:
+        dose_counts[value] = dose_counts.get(value, 0) + 1
+
+    return {
+        "weekly_plan_raw": weekly_plan_raw,
+        "weekly_plan_list": weekly_plan_list,
+        "period_weeks": period_weeks,
+        "dose_counts": dose_counts,
+        "dose_options": ["0", "2.5", "5", "7.5", "10", "12.5", "15"],
+    }
+
+
 def _render_home(report: Dict[str, Any] | None, form_data: Dict[str, Any] | None, username: str) -> str:
     history = _get_user_history(username)
+    plan_context = _plan_context(form_data or {})
     return render_template(
         "home.html",
         report=report,
@@ -126,6 +161,7 @@ def _render_home(report: Dict[str, Any] | None, form_data: Dict[str, Any] | None
         history=history,
         username=username,
         active_tab="results" if report else "input",
+        **plan_context,
     )
 
 

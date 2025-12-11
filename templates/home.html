@@ -1,563 +1,462 @@
 <!DOCTYPE html>
 <html lang="ko">
 <head>
-  <meta charset="UTF-8" />
-  <title>마운자로 감량 플랜 생성기</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <style>
-    :root {
-      --bg: #f5f6fa;
-      --card: #fff;
-      --accent: #2563eb;
-      --muted: #6b7280;
-      --border: #e5e7eb;
-      --shadow: 0 10px 30px rgba(0,0,0,0.08);
-    }
-    * { box-sizing: border-box; }
-    body { font-family: 'Pretendard', 'Noto Sans KR', sans-serif; background: var(--bg); margin: 0; padding: 24px; color: #0f172a; }
-    h1 { text-align: center; margin-bottom: 16px; }
-    h2 { margin: 0 0 8px; }
-    .card { background: var(--card); padding: 16px 20px; box-shadow: var(--shadow); border-radius: 12px; }
-    .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
-    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
-    label { display: block; font-weight: 700; margin-bottom: 6px; }
-    input, select { width: 100%; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
-    button { margin-top: 16px; padding: 12px 16px; background: var(--accent); color: #fff; border: none; border-radius: 10px; cursor: pointer; font-weight: 800; width: 100%; }
-    button:hover { background: #1d4ed8; }
-    .note { color: var(--muted); font-size: 0.92em; margin-top: 4px; line-height: 1.4; }
-    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-    th, td { border: 1px solid var(--border); padding: 8px; text-align: center; }
-    thead { background: #f3f4f6; }
-    tbody tr:nth-child(even) { background: #fafafa; }
-    .muted { color: var(--muted); }
-    .history-report { margin-top: 8px; background: #f9fafb; padding: 10px; border-radius: 6px; }
-    .tabs { display: flex; gap: 10px; margin-bottom: 12px; }
-    .tab-btn { padding: 10px 14px; border-radius: 999px; border: 1px solid var(--border); background: #fff; cursor: pointer; font-weight: 700; color: #374151; }
-    .tab-btn.active { background: #e0ecff; border-color: #bfdbfe; color: #1d4ed8; }
-    .tab-panel { display: none; }
-    .tab-panel.active { display: block; }
-    .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-bottom: 12px;}
-    .summary-card { border: 1px solid var(--border); border-radius: 12px; padding: 12px; background: #f8fafc; }
-    .summary-card strong { display: block; font-size: 1.2em; margin-top: 6px; }
-    .pill { display: inline-block; padding: 4px 8px; border-radius: 999px; background: #eef2ff; color: #4338ca; font-weight: 700; font-size: 0.85em; }
-    .loading-overlay { position: fixed; inset: 0; background: rgba(255,255,255,0.7); display: flex; align-items: center; justify-content: center; font-size: 1.1em; font-weight: 800; color: #1d4ed8; z-index: 50; backdrop-filter: blur(3px); display: none; }
-    .loading-overlay.active { display: flex; }
-    .chart-wrap { padding: 16px; background: #fff; border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); }
-    .weekly-plan-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
-    .weekly-dose-row { border: 1px solid var(--border); border-radius: 10px; padding: 10px; background: #fff; display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center; transition: box-shadow 0.2s ease, border-color 0.2s ease, background-color 0.2s ease; }
-    .weekly-dose-row.current-week { border-color: #bfdbfe; box-shadow: 0 10px 24px rgba(37, 99, 235, 0.12); background: #eff6ff; }
-    .week-label { font-weight: 800; color: #1f2937; }
-    .current-week-pill { display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px; background: #eef2ff; color: #1d4ed8; border-radius: 999px; font-weight: 800; margin: 6px 0 12px; }
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>마운자로 플랜 생성기</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f0f2f5;
+            color: #333;
+            font-size: 14px;
+        }
+        .container {
+            max-width: 900px;
+            margin: 20px auto;
+            padding: 0 15px;
+        }
+        h1 { text-align: center; color: #2c3e50; margin-bottom: 20px; }
+        h2 { margin: 0 0 15px 0; font-size: 1.4em; color: #333; }
+
+        .tab-container {
+            background-color: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        .tab-nav {
+            display: flex;
+            border-bottom: 1px solid #ddd;
+            background-color: #f7f7f7;
+        }
+        .tab-button {
+            flex: 1;
+            padding: 15px;
+            font-size: 1em;
+            text-align: center;
+            cursor: pointer;
+            border: none;
+            background-color: transparent;
+            transition: background-color 0.2s, color 0.2s;
+            color: #555;
+            font-weight: 500;
+        }
+        .tab-button:hover {
+            background-color: #e9e9e9;
+        }
+        .tab-button.active {
+            color: #007bff;
+            border-bottom: 3px solid #007bff;
+            background-color: #fff;
+        }
+        .tab-content {
+            display: none;
+            padding: 25px;
+        }
+        .tab-content.active {
+            display: block;
+        }
+
+        /* 폼 스타일 */
+        form { display: flex; flex-direction: column; gap: 25px; }
+        .form-section { display: flex; flex-direction: column; gap: 15px; }
+        .form-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px 20px;
+        }
+        .form-group { display: flex; flex-direction: column; }
+        label {
+            margin-bottom: 6px;
+            font-weight: 500;
+            font-size: 0.9em;
+            color: #495057;
+        }
+        input, select {
+            padding: 10px;
+            font-size: 1em;
+            border-radius: 5px;
+            border: 1px solid #ced4da;
+            width: 100%;
+            box-sizing: border-box;
+            transition: border-color .15s ease-in-out,box-shadow .15s ease-in-out;
+        }
+        input:focus, select:focus {
+            border-color: #80bdff;
+            outline: 0;
+            box-shadow: 0 0 0 0.2rem rgba(0,123,255,.25);
+        }
+        button[type="submit"] {
+            background-color: #007bff; color: white; font-weight: bold; cursor: pointer; border: none;
+            padding: 12px; font-size: 1.1em; border-radius: 5px; margin-top: 10px;
+        }
+        button[type="submit"]:hover { background-color: #0056b3; }
+        .form-note { font-size: 0.9em; color: #6c757d; margin: 0; }
+        h3 { font-size: 1.2em; color: #343a40; margin: 0; padding-bottom: 8px; border-bottom: 1px solid #eee; }
+
+        /* 주차별 용량 계획 */
+        .dose-plan-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+            gap: 12px;
+        }
+        .dose-week-item {
+            background: #f8f9fa; padding: 8px; border-radius: 6px; border: 1px solid #e9ecef;
+            display: flex; flex-direction: column; gap: 5px;
+        }
+        .dose-week-item label { font-size: 0.85em; text-align: center; margin-bottom: 0; }
+
+        /* 결과 요약 화면용 스타일 */
+        .view-toggle {
+            margin-bottom: 15px;
+            display: flex;
+            gap: 10px;
+        }
+        .view-toggle button {
+            padding: 8px 12px;
+            border: 1px solid #007bff;
+            background: #fff;
+            color: #007bff;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        .view-toggle button.active {
+            background: #007bff;
+            color: #fff;
+        }
+
+        /* 용량 계획 도우미 버튼 */
+        .dose-plan-helpers {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+        .helper-btn {
+            padding: 6px 12px;
+            font-size: 0.9em;
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 20px;
+            cursor: pointer;
+            transition: background-color 0.2s, border-color 0.2s;
+        }
+        .helper-btn:hover { background-color: #e9ecef; border-color: #ced4da; }
+    </style>
 </head>
 <body>
-  <div class="loading-overlay" id="loading-overlay">계산 중... 결과를 준비하고 있습니다</div>
-  <h1>마운자로 감량 플랜 생성기</h1>
-  <div class="tabs">
-    <button class="tab-btn" data-target="input">데이터 입력</button>
-    <button class="tab-btn" data-target="results">결과 요약</button>
-    <button class="tab-btn" data-target="reference">감량 참고</button>
-    <button class="tab-btn" data-target="disclaimer">주의/면책</button>
-    <button class="tab-btn" data-target="history">저장 이력</button>
-  </div>
-
-  <section class="tab-panel" id="tab-input">
-    <div class="card">
-      <h2>계산기</h2>
-      <div class="current-week-pill" id="current-week-indicator">플랜 시작일을 입력하면 현재 주차를 계산합니다.</div>
-      <form method="post" action="/generate" id="plan-form">
-        <input type="hidden" name="weekly_dose_plan" id="weekly_dose_plan_hidden" value="{{ weekly_plan_raw }}" />
-        <div class="form-grid">
-          <div><label>사용자 이름</label><input type="text" name="username" value="{{ username }}" placeholder="보고서를 저장할 이름" /></div>
-          <div><label>시작 체중(kg)</label><input type="number" step="0.1" name="start_weight" value="{{ form_data.get('start_weight','') }}" required /></div>
-          <div><label>현재 체중(kg)</label><input type="number" step="0.1" name="current_weight" value="{{ form_data.get('current_weight','') }}" required /></div>
-          <div><label>목표 체중(kg)</label><input type="number" step="0.1" name="target_weight" value="{{ form_data.get('target_weight','') }}" required /></div>
-          <div><label>예상 진행 기간(주)</label><input type="number" step="1" name="period_weeks" value="{{ form_data.get('period_weeks', period_weeks) }}" placeholder="예: 24" /></div>
-          <div><label>플랜 시작일</label><input type="date" name="start_date" value="{{ form_data.get('start_date','') }}" /></div>
-          <div><label><input type="checkbox" name="auto_titration" {% if form_data.get('auto_titration') %}checked{% endif %} /> 기본 증량 템플릿 제안</label><p class="note">체크해도 주차별 용량을 수정하면 해당 패턴을 그대로 사용합니다.</p></div>
-          <div style="grid-column: span 2;">
-            <label>주차별 실제 투여 용량</label>
-            <select id="weekly-plan-template" style="margin-bottom: 10px;">
-              <option value="">직접 선택 (주차별/용량별 셀렉트 사용)</option>
-              <option value="2.5,2.5,2.5,2.5,5,5,5,5,7.5,7.5,7.5,7.5,10,10,10,10,5">2.5×4주 → 5×4주 → 7.5×4주 → 10×4주 → 5mg 유지</option>
-              <option value="2.5,2.5,2.5,2.5,5,5,5,5,7.5,7.5,7.5,7.5,10,10,10,10">2.5×4주 → 5×4주 → 7.5×4주 → 10×4주</option>
-              <option value="2.5,2.5,5,5,5,5,7.5,7.5,7.5,7.5">2.5×2주 → 5×4주 → 7.5×4주</option>
-            </select>
-            <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); margin-bottom: 10px;">
-              {% for dose in ['2.5','5','7.5','10','12.5','15'] %}
-                <div>
-                  <label style="font-weight: 600;">{{ dose }}mg 회차</label>
-                  <select class="dose-count-select" data-dose="{{ dose }}">
-                    {% for count in range(0, period_weeks + 1) %}
-                      <option value="{{ count }}" {% if weekly_plan_list and weekly_plan_list|count(dose) == count %}selected{% endif %}>{{ count }}회</option>
-                    {% endfor %}
-                  </select>
-                </div>
-              {% endfor %}
+    <div class="container">
+        <h1>마운자로 플랜 생성기</h1>
+        <div class="tab-container">
+            <div class="tab-nav">
+                <button id="btn-input" class="tab-button" onclick="showTab('input-content', this)">데이터 입력</button>
+                <button id="btn-results" class="tab-button" onclick="showTab('results-content', this)">결과 요약</button>
             </div>
-              <div class="weekly-plan-grid">
-                {% for week in range(1, period_weeks + 1) %}
-                  {% set selected_value = weekly_plan_list[week-1] if weekly_plan_list|length >= week else weekly_plan_list[-1] %}
-                  <div class="weekly-dose-row" data-week="{{ week }}">
-                    <div class="week-label">{{ week }}주차</div>
-                  <select class="weekly-dose-select" name="weekly_dose_plan[]" data-week-index="{{ week }}">
-                    {% for option in dose_options %}
-                      <option value="{{ option }}" {% if option|string == selected_value|string %}selected{% endif %}>{{ option }} mg</option>
-                    {% endfor %}
-                  </select>
-                </div>
-              {% endfor %}
+
+            <div id="input-content" class="tab-content">
+                <h2>플랜 정보 입력</h2>
+                <form action="/generate" method="post" id="plan-form">
+                    <div class="form-section">
+                        <h3>기본 정보</h3>
+                        <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));">
+                            <div class="form-group">
+                                <label for="username">사용자 이름</label>
+                                <input type="text" id="username" name="username" value="{{ form_data.username or username or '' }}" placeholder="기록 관리를 위한 이름">
+                            </div>
+                            <div class="form-group">
+                                <label for="start_date">플랜 시작일</label>
+                                <input type="date" id="start_date" name="start_date" value="{{ form_data.start_date or '' }}">
+                            </div>
+                        </div>
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label for="start_weight">시작 체중 (kg)</label>
+                                <input type="number" step="0.1" id="start_weight" name="start_weight" value="{{ form_data.start_weight or '' }}" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="current_weight">현재 체중 (kg)</label>
+                                <input type="number" step="0.1" id="current_weight" name="current_weight" value="{{ form_data.current_weight or '' }}" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="target_weight">목표 체중 (kg)</label>
+                                <input type="number" step="0.1" id="target_weight" name="target_weight" value="{{ form_data.target_weight or '' }}" required>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>주차별 용량 계획</h3>
+                        <div class="form-grid" style="grid-template-columns: 1fr 2fr;">
+                            <div class="form-group">
+                                <label for="period_weeks">적응기 기간 (주)</label>
+                                <input type="number" id="period_weeks" name="period_weeks" value="{{ period_weeks }}" min="1" max="52" title="주차 수를 변경하면 아래 계획표가 자동으로 조절됩니다.">
+                            </div>
+                        </div>
+                        <div id="weekly-dose-container">
+                            <div class="dose-plan-helpers">
+                                <button type="button" class="helper-btn" onclick="applyTitrationPattern()">단계별 증량</button>
+                                <button type="button" class="helper-btn" onclick="unifyWithFirstWeekDose()">1주차 용량으로 통일</button>
+                                <button type="button" class="helper-btn" onclick="applyTitrationAndMaintain5mg()">단계별 + 5mg 유지</button>
+                            </div>
+                            <p class="form-note">각 주차에 투여할 용량(mg)을 선택하세요.</p>
+                            <div class="dose-plan-grid">
+                                {% for i in range(period_weeks) %}
+                                <div class="dose-week-item">
+                                    <label><strong>{{ i + 1 }}주차</strong></label>
+                                    <select name="weekly_dose_plan[]">
+                                        {% for dose in dose_options %}
+                                        <option value="{{ dose }}" {% if i < weekly_plan_list|length and weekly_plan_list[i] == dose %}selected{% endif %}>{{ dose }} mg</option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>예상 감량치 설정 (선택)</h3>
+                        <p class="form-note">미입력 시 활동 수준에 따른 기본값이 적용됩니다. 본인의 경험치를 입력하면 더 정확해집니다.</p>
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label for="activity_level">활동 수준</label>
+                                <select id="activity_level" name="activity_level">
+                                    <option value="baseline" {% if (form_data.activity_level or 'baseline') == 'baseline' %}selected{% endif %}>일반 (기본값)</option>
+                                    <option value="none" {% if form_data.activity_level == 'none' %}selected{% endif %}>운동 거의 안함</option>
+                                    <option value="moderate" {% if form_data.activity_level == 'moderate' %}selected{% endif %}>운동 보통</option>
+                                    <option value="active" {% if form_data.activity_level == 'active' %}selected{% endif %}>운동 열심히</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));">
+                            <div class="form-group"><label for="loss_2_5">2.5mg (4주 감량 kg)</label><input type="number" step="0.1" name="loss_2_5" value="{{ form_data.loss_2_5 or '' }}" placeholder="예: 3.0"></div>
+                            <div class="form-group"><label for="loss_5">5mg (4주 감량 kg)</label><input type="number" step="0.1" name="loss_5" value="{{ form_data.loss_5 or '' }}" placeholder="예: 2.5"></div>
+                            <div class="form-group"><label for="loss_7_5">7.5mg (4주 감량 kg)</label><input type="number" step="0.1" name="loss_7_5" value="{{ form_data.loss_7_5 or '' }}" placeholder="예: 3.0"></div>
+                            <div class="form-group"><label for="loss_10">10mg (4주 감량 kg)</label><input type="number" step="0.1" name="loss_10" value="{{ form_data.loss_10 or '' }}" placeholder="예: 4.0"></div>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>체성분 정보 (선택)</h3>
+                        <p class="form-note">현재 체성분 값을 입력하면 리포트에서 변화를 예측합니다.</p>
+                        <div class="form-grid">
+                            <div class="form-group"><label for="skeletal_muscle">현재 골격근량 (kg)</label><input type="number" step="0.1" name="skeletal_muscle" value="{{ form_data.skeletal_muscle or '' }}"></div>
+                            <div class="form-group"><label for="fat_mass">현재 체지방량 (kg)</label><input type="number" step="0.1" name="fat_mass" value="{{ form_data.fat_mass or '' }}"></div>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>유지기 설정</h3>
+                        <div class="form-grid">
+                            <div class="form-group"><label for="maintenance_months">유지 기간 (개월)</label><input type="number" name="maintenance_months" value="{{ form_data.maintenance_months or 3 }}" min="0"></div>
+                            <div class="form-group">
+                                <label for="maintenance_dose">유지 용량 (mg)</label>
+                                <select name="maintenance_dose">
+                                    {% for dose in dose_options %}
+                                    <option value="{{ dose }}" {% if (form_data.maintenance_dose or 5.0)|string == dose %}selected{% endif %}>{{ dose }} mg</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="form-group"><label for="maintenance_interval_weeks">유지기 투여 간격 (주)</label><input type="number" name="maintenance_interval_weeks" value="{{ form_data.maintenance_interval_weeks or 4 }}" min="1"></div>
+                        </div>
+                    </div>
+
+                    <button type="submit">리포트 생성하기</button>
+                </form>
             </div>
-            <p class="note">예상 진행 기간(주)에 맞춰 주차별 용량을 선택하세요. 기간보다 짧은 값이 넘어온 경우 마지막 용량으로 채워집니다.</p>
-          </div>
-          <div><label>2.5mg 예상 감량(초기 4주)</label><input type="number" step="0.1" name="loss_2_5" value="{{ form_data.get('loss_2_5','') }}" placeholder="-3.0" /></div>
-          <div><label>5mg 예상 감량(초기 4주)</label><input type="number" step="0.1" name="loss_5" value="{{ form_data.get('loss_5','') }}" placeholder="-2.5" /></div>
-          <div><label>7.5mg 예상 감량(초기 4주)</label><input type="number" step="0.1" name="loss_7_5" value="{{ form_data.get('loss_7_5','') }}" placeholder="-3.0" /></div>
-          <div><label>10mg 예상 감량(초기 4주)</label><input type="number" step="0.1" name="loss_10" value="{{ form_data.get('loss_10','') }}" placeholder="-4.0" /></div>
-          <div><label>운동/활동 수준</label>
-            <select name="activity_level">
-              <option value="baseline" {% if form_data.get('activity_level','baseline') == 'baseline' %}selected{% endif %}>기본(보수적)</option>
-              <option value="none" {% if form_data.get('activity_level') == 'none' %}selected{% endif %}>운동 거의 안 함</option>
-              <option value="moderate" {% if form_data.get('activity_level') == 'moderate' %}selected{% endif %}>운동 보통</option>
-              <option value="active" {% if form_data.get('activity_level') == 'active' %}selected{% endif %}>운동 열심히</option>
-            </select>
-          </div>
-          <div><label>골격근량(kg)</label><input type="number" step="0.1" name="skeletal_muscle" value="{{ form_data.get('skeletal_muscle','') }}" /></div>
-          <div><label>체지방량(kg)</label><input type="number" step="0.1" name="fat_mass" value="{{ form_data.get('fat_mass','') }}" /></div>
-          <div><label>내장지방 레벨</label><input type="number" step="0.1" name="visceral_level" value="{{ form_data.get('visceral_level','') }}" /></div>
-          <div><label>WHR</label><input type="number" step="0.01" name="whr" value="{{ form_data.get('whr','') }}" /></div>
-          <div><label>유지 시작 용량(mg)</label><input type="number" step="0.1" name="maintenance_start_dose" value="{{ form_data.get('maintenance_start_dose','') }}" placeholder="5" /></div>
-          <div><label>유지 용량(mg)</label><input type="number" step="0.1" name="maintenance_dose" value="{{ form_data.get('maintenance_dose','') }}" placeholder="5" /></div>
-          <div><label>유지 주기(주)</label><input type="number" step="1" name="maintenance_interval_weeks" value="{{ form_data.get('maintenance_interval_weeks','') }}" placeholder="4" /></div>
-          <div><label>유지 기간(개월)</label><input type="number" step="1" name="maintenance_months" value="{{ form_data.get('maintenance_months','') }}" placeholder="3" /></div>
+
+            <div id="results-content" class="tab-content">
+                {% if report and report.report %}
+                    {# mounjaro_plan.py에서 생성된 HTML (개요, 비용, 체성분) #}
+                    {{ report_html|safe }}
+
+                    {# 주차별 예상 감량 (테이블 + 그래프) #}
+                    {% if report.weight_projection %}
+                    <div class="card">
+                        <h2>주차별 예상 감량</h2>
+                        <div class="view-toggle">
+                            <button id="show-table-btn" class="active" onclick="showProjectionView('table', this)">테이블 보기</button>
+                            <button id="show-graph-btn" onclick="showProjectionView('graph', this)">그래프 보기</button>
+                        </div>
+                
+                        <div id="projection-table-view" style="display: block;">
+                            <div class='table-wrapper'>
+                                <table>
+                                    <thead><tr><th>시점</th><th>투여(mg)</th><th>감량(kg)</th><th>예상 체중</th></tr></thead>
+                                    <tbody>
+                                        {% for row in report.weight_projection %}
+                                        <tr><td>{{ row.label }}</td><td>{{ row.dose_mg|round(1) }}</td><td>{{ row.expected_loss_kg|round(2) }}</td><td>{{ row.expected_weight_kg|round(2) }}</td></tr>
+                                        {% endfor %}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                
+                        <div id="projection-graph-view" style="display: none;">
+                            <canvas id="weightChart"></canvas>
+                        </div>
+                    </div>
+                    {% endif %}
+                {% else %}
+                    <h2>결과가 없습니다</h2>
+                    <p>'데이터 입력' 탭에서 정보를 입력하고 리포트를 생성하면, 이곳에 결과가 표시됩니다.</p>
+                {% endif %}
+            </div>
         </div>
-        <p class="note">필수 항목(시작/현재/목표 체중)만 입력하면 기본 가정으로 리포트를 생성합니다. 사용자 이름을 입력하면 데이터가 저장되고 이력이 표시됩니다.</p>
-        <p class="note">기본 감량값은 현실적인 초기 4주 수치(2.5mg -3kg, 5mg -2.5kg, 7.5mg -3kg, 10mg -4kg)를 시작점으로 잡고, 2단계는 0.8배, 3단계는 0.6배로 자동 완화됩니다. 운동/활동 수준을 선택하면 7.5mg/10mg 초기값이 함께 조정되며, 입력칸을 비워두면 자동 값이 적용되고 직접 입력 시 해당 값이 우선합니다. 모든 투약·감량 결정은 담당 의사와 상의해야 합니다.</p>
-        <button type="submit">리포트 생성 및 저장</button>
-      </form>
     </div>
-  </section>
 
-  <section class="tab-panel" id="tab-results">
-    {% if report %}
-      <div class="summary-grid">
-        <div class="summary-card">
-          <span class="pill">남은 감량</span>
-          <strong>{{ report.plan_summary.remaining_loss }} kg</strong>
-          <p class="note">목표까지 남은 체중 감량</p>
-        </div>
-        <div class="summary-card">
-          <span class="pill">예상 기간</span>
-          <strong>{{ report.plan_summary.total_weeks_with_maintenance }} 주</strong>
-          <p class="note">적응 + 유지 주차 총합</p>
-        </div>
-        <div class="summary-card">
-          <span class="pill">총 비용</span>
-          <strong>{{ '{:,}'.format(report.cost_summary.total_cost) }}원</strong>
-          <p class="note">적응기 + 유지기 합산</p>
-        </div>
-        <div class="summary-card">
-          <span class="pill">실제 투약 주차</span>
-          <strong>{{ report.plan_summary.last_non_zero_week }} 주</strong>
-          <p class="note">0mg 제외, 실제 투약이 있는 마지막 주차</p>
-        </div>
-        <div class="summary-card">
-          <span class="pill">예상 도달 체중</span>
-          <strong>{{ report.plan_summary.projected_weight }} kg</strong>
-          <p class="note">모든 단계 종료 시 체중</p>
-        </div>
-        <div class="summary-card">
-          <span class="pill">종료 예상일</span>
-          {% if report.timeline and report.timeline.estimated_end_date %}
-            <strong>{{ report.timeline.estimated_end_date }} ({{ report.timeline.d_day }})</strong>
-            <p class="note">{{ report.timeline.start_date }} 시작, 남은 {{ report.timeline.remaining_days }}일</p>
-          {% else %}
-            <strong>시작일 필요</strong>
-            <p class="note">플랜 시작일을 입력하면 종료일과 D-DAY가 계산됩니다.</p>
-          {% endif %}
-        </div>
-      </div>
-
-      <div class="grid">
-        <div class="card">
-          <h2>예상 감량 추이</h2>
-          {% if report.weight_projection %}
-            <table>
-              <thead>
-                <tr><th>주차</th><th>투여 용량(mg)</th><th>주차별 감량(kg)</th><th>예상 체중(kg)</th></tr>
-              </thead>
-              <tbody>
-                {% for row in report.weight_projection %}
-                  <tr>
-                    <td>{{ row.week_index }}</td>
-                    <td>{{ row.dose_mg }}</td>
-                    <td>{{ row.expected_loss_kg }}</td>
-                    <td>{{ row.expected_weight_kg }}</td>
-                  </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-            <p class="note">※ 입력한 weekly_dose_plan을 그대로 사용한 단순 모델 추정치입니다.</p>
-          {% else %}
-            <p class="muted">감량 계획이 필요하지 않습니다.</p>
-          {% endif %}
-        </div>
-        <div class="card">
-          <h2>비용 요약</h2>
-          <table>
-            <tbody>
-              <tr><th>적응기 누적비용</th><td>{{ '{:,}'.format(report.cost_summary.completed_adaptation_cost) }}원</td></tr>
-              <tr><th>적응기 예정비용</th><td>{{ '{:,}'.format(report.cost_summary.upcoming_adaptation_cost) }}원</td></tr>
-              <tr><th>적응기 총비용</th><td>{{ '{:,}'.format(report.cost_summary.adaptation_cost) }}원</td></tr>
-              <tr><th>유지기 총비용</th><td>{{ '{:,}'.format(report.cost_summary.maintenance_cost) }}원</td></tr>
-              <tr><th>유지기 펜 소요량</th><td>{{ report.cost_summary.maintenance_pens }}펜 (4펜 묶음 {{ report.cost_summary.maintenance_bundles }}개)</td></tr>
-              <tr><th>전체 합계</th><td><strong>{{ '{:,}'.format(report.cost_summary.total_cost) }}원</strong></td></tr>
-            </tbody>
-          </table>
-          {% if report.cost_summary.dose_pens %}
-            <p class="note">용량별 적응기 펜 사용량</p>
-            <table>
-              <thead><tr><th>용량</th><th>펜 수(주)</th><th>해당 비용</th></tr></thead>
-              <tbody>
-                {% for item in report.cost_summary.dose_breakdown %}
-                  <tr><td>{{ item.dose }}</td><td>{{ item.pens }}펜</td><td>{{ '{:,'.format(item.cost) }}원</td></tr>
-                {% endfor %}
-              </tbody>
-            </table>
-            <p class="note">1주 1펜 사용을 4펜(4주) 묶음 단가로 환산해 적응기 비용에 반영합니다. (2.5mg 289,000원 / 5mg 380,000원 / 7.5·10mg 549,000원)</p>
-          {% endif %}
-          <p class="note">현재 체중을 기준으로 이미 지나간 단계는 누적 비용에, 앞으로 필요한 단계는 예정 비용에 더해 총합을 계산했습니다.</p>
-        </div>
-        <div class="card">
-          <h2>유지 플랜 요약</h2>
-          <table>
-            <tbody>
-              <tr><th>유지 용량</th><td>{{ report.maintenance_summary.dose }} mg</td></tr>
-              <tr><th>유지 주기</th><td>{{ report.maintenance_summary.interval_weeks }} 주마다 1펜</td></tr>
-              <tr><th>유지 기간</th><td>{{ report.maintenance_summary.weeks }} 주 (약 {{ report.maintenance_summary.weeks // 4 }}개월)</td></tr>
-              <tr><th>총 펜 수</th><td>{{ report.maintenance_summary.pens }}펜 (4펜 묶음 {{ report.maintenance_summary.bundles }}개)</td></tr>
-            </tbody>
-          </table>
-          {% if report.timeline and report.timeline.maintenance_start_date %}
-            <p class="note">적응기 종료 예상일: {{ report.timeline.maintenance_start_date }}, 유지 종료 예상일: {{ report.timeline.estimated_end_date }} ({{ report.timeline.d_day }})</p>
-          {% else %}
-            <p class="note">시작일을 입력하면 유지 시작/종료 시점을 계산합니다.</p>
-          {% endif %}
-        </div>
-      </div>
-
-      <div class="card">
-        <h2>감량 그래프</h2>
-        <div class="chart-wrap">
-          <canvas id="projectionChart" height="120"></canvas>
-        </div>
-        <p class="note">시작일을 입력하면 해당 날짜부터 1주 단위로 예상 체중을 표시하며, 입력하지 않아도 주차별 감량 추이를 보여줍니다.</p>
-      </div>
-
-      <div class="card">
-        {{ report_html|safe }}
-      </div>
-    {% else %}
-      <div class="card">
-        <p class="muted">아직 생성된 리포트가 없습니다. 입력 탭에서 값을 입력해 주세요.</p>
-      </div>
-    {% endif %}
-  </section>
-
-  <section class="tab-panel" id="tab-reference">
-    <div class="card">
-      <h2>초기~중기 감량 참고치</h2>
-      <p class="note">SURMOUNT 그래프와 실사용 경험을 단순 요약한 참고 범위입니다. 계산기는 1→2→3단계로 갈수록 자동 완화 규칙을 적용합니다.</p>
-      <table>
-        <thead><tr><th>기간</th><th>보편적 감량 경향</th></tr></thead>
-        <tbody>
-          <tr><td>1~4주</td><td>-2 ~ -4kg</td></tr>
-          <tr><td>5~8주</td><td>-2 ~ -5kg</td></tr>
-          <tr><td>9~12주</td><td>-3 ~ -6kg</td></tr>
-          <tr><td>12주 누적</td><td>-6% ~ -12% (약 -6 ~ -12kg)</td></tr>
-        </tbody>
-      </table>
-      <table>
-        <thead><tr><th>7.5mg</th><th>운동 안 함</th><th>운동 보통</th><th>운동 열심히</th></tr></thead>
-        <tbody>
-          <tr><td>1단계(1~4주)</td><td>-2.0kg</td><td>-3.5kg</td><td>-5.0kg</td></tr>
-          <tr><td>2단계(5~8주)</td><td>-1.5kg</td><td>-3.0kg</td><td>-4.0kg</td></tr>
-          <tr><td>3단계(9~12주)</td><td>-1.0kg</td><td>-2.0kg</td><td>-3.0kg</td></tr>
-          <tr><td>3개월 누적</td><td colspan="3">현실 범위: -6 ~ -12kg</td></tr>
-        </tbody>
-      </table>
-      <table>
-        <thead><tr><th>10mg</th><th>운동 안 함</th><th>운동 보통</th><th>운동 열심히</th></tr></thead>
-        <tbody>
-          <tr><td>1단계(1~4주)</td><td>-3.0kg</td><td>-4.5kg</td><td>-7.0kg</td></tr>
-          <tr><td>2단계(5~8주)</td><td>-2.0kg</td><td>-3.0kg</td><td>-5.0kg</td></tr>
-          <tr><td>3단계(9~12주)</td><td>-1.0kg</td><td>-2.0kg</td><td>-3.0kg</td></tr>
-          <tr><td>3개월 누적</td><td colspan="3">현실 범위: -8 ~ -15kg (운동 병행 시 -12~-15kg 흔함)</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </section>
-
-  <section class="tab-panel" id="tab-disclaimer">
-    <div class="card">
-      <h2>주의/면책</h2>
-      <p class="note">이 리포트는 사용자가 입력한 값과 단순 수학적 모델에 기반한 '예상치'입니다. 실제 체중 변화, 혈당·당뇨 상태, 인바디 수치는 개인에 따라 크게 달라질 수 있습니다.</p>
-      <p class="note">마운자로(티르제파타이드)의 용량 조절, 투여 시작·유지·중단, 다른 약과의 병용 여부 등 모든 의료적 결정은 반드시 담당 의사와 상의하여 결정해야 합니다. 이 프로그램은 의료적 진단이나 처방을 제공하지 않으며, 정보를 정리하고 시각화하는 도구입니다.</p>
-      <p class="note">기본 감량 가정은 SURMOUNT 연구(10mg 평균 약 -19.5%/72주 등)를 보수적으로 환산한 값입니다. 개인별 식단·운동·질환 상태에 따라 실제 감량 속도는 크게 달라질 수 있습니다.</p>
-    </div>
-  </section>
-
-  <section class="tab-panel" id="tab-history">
-    <div class="card">
-      <h2>사용자별 이력</h2>
-      <p class="note">최근 20개의 리포트가 저장됩니다. 사용자 이름을 입력한 뒤 리포트를 생성하면 해당 이름으로 묶어 저장됩니다.</p>
-      {% if username %}
-        <p><strong>{{ username }}</strong>님의 저장된 리포트</p>
-      {% endif %}
-      {% if history %}
-        <table>
-          <thead><tr><th>생성 시각(UTC)</th><th>시작/현재/목표(kg)</th><th>총비용(원)</th><th>상세</th></tr></thead>
-          <tbody>
-            {% for item in history %}
-              <tr>
-                <td>{{ item.timestamp }}</td>
-                <td>{{ item.start_weight }} → {{ item.current_weight }} → {{ item.target_weight }}</td>
-                <td>{{ '{:,}'.format(item.total_cost or 0) }}</td>
-                <td>
-                  <details>
-                    <summary>리포트 보기</summary>
-                    <div class="history-report">{{ item.report_html|safe }}</div>
-                  </details>
-                </td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      {% else %}
-        <p class="muted">표시할 저장 이력이 없습니다. 사용자 이름을 입력하고 리포트를 생성해 보세요.</p>
-      {% endif %}
-    </div>
-  </section>
-
-<script>
-  const tabButtons = document.querySelectorAll('.tab-btn');
-  const tabPanels = document.querySelectorAll('.tab-panel');
-  const activeTab = '{{ active_tab }}';
-  const weeklySelects = document.querySelectorAll('.weekly-dose-select');
-  const weeklyRows = document.querySelectorAll('.weekly-dose-row');
-  const weeklyPlanHidden = document.getElementById('weekly_dose_plan_hidden');
-  const startDateInput = document.querySelector('input[name="start_date"]');
-  const periodWeeksInput = document.querySelector('input[name="period_weeks"]');
-  const currentWeekIndicator = document.getElementById('current-week-indicator');
-  const doseCountSelects = document.querySelectorAll('.dose-count-select');
-  const weeklyPlanTemplate = document.getElementById('weekly-plan-template');
-  const autoTitrationInput = document.querySelector('input[name="auto_titration"]');
-
-  function activateTab(target) {
-    tabButtons.forEach(btn =>
-      btn.classList.toggle('active', btn.dataset.target === target)
-    );
-    tabPanels.forEach(panel =>
-      panel.classList.toggle('active', panel.id === `tab-${target}`)
-    );
-  }
-
-  tabButtons.forEach(btn => {
-    btn.addEventListener('click', () => activateTab(btn.dataset.target));
-  });
-
-  // 기본 활성 탭
-  activateTab(activeTab || 'input');
-
-  // 폼 제출 시 로딩 오버레이
-  const form = document.getElementById('plan-form');
-  const overlay = document.getElementById('loading-overlay');
-  function syncWeeklyPlanString() {
-    if (!weeklyPlanHidden || weeklySelects.length === 0) return;
-    const values = Array.from(weeklySelects).map(select => select.value || '5');
-    weeklyPlanHidden.value = values.join(',');
-    updateDoseCountSelectorsFromPlan(values);
-  }
-
-  function applyTemplate(templateValue) {
-    if (!templateValue || weeklySelects.length === 0) return;
-    const tokens = templateValue.split(',').map(v => v.trim()).filter(Boolean);
-    if (tokens.length === 0) return;
-
-    const totalWeeks = parseInt(periodWeeksInput?.value || `${weeklySelects.length}`, 10);
-    const weeks = Number.isFinite(totalWeeks) && totalWeeks > 0 ? totalWeeks : weeklySelects.length;
-
-    const plan = [];
-    for (let i = 0; i < weeks; i += 1) {
-      const value = tokens[i] ?? tokens[tokens.length - 1];
-      plan.push(value);
-    }
-
-    weeklySelects.forEach((select, idx) => {
-      select.value = plan[idx] ?? plan[plan.length - 1] ?? '5';
-    });
-
-    syncWeeklyPlanString();
-  }
-
-  function syncTemplateSelector() {
-    if (!weeklyPlanTemplate) return;
-    const planValue = weeklyPlanHidden?.value || '';
-    const options = Array.from(weeklyPlanTemplate.options);
-    const match = options.find(option => option.value === planValue);
-    weeklyPlanTemplate.value = match ? match.value : '';
-  }
-
-  function updateDoseCountSelectorsFromPlan(planValues) {
-    const counts = planValues.reduce((acc, dose) => {
-      acc[dose] = (acc[dose] || 0) + 1;
-      return acc;
-    }, {});
-
-    doseCountSelects.forEach(select => {
-      const dose = select.dataset.dose;
-      const count = counts[dose] || 0;
-      if (select.querySelector(`option[value="${count}"]`)) {
-        select.value = String(count);
-      }
-    });
-  }
-
-  function applyDoseCountsToWeeklyPlan() {
-    if (weeklySelects.length === 0) return;
-    const targetWeeks = parseInt(periodWeeksInput?.value || `${weeklySelects.length}`, 10);
-    const totalWeeks = Number.isFinite(targetWeeks) && targetWeeks > 0 ? targetWeeks : weeklySelects.length;
-
-    const plan = [];
-    doseCountSelects.forEach(select => {
-      const dose = select.dataset.dose;
-      const count = parseInt(select.value || '0', 10);
-      if (!Number.isFinite(count) || count <= 0) return;
-      for (let i = 0; i < count; i += 1) {
-        if (plan.length < totalWeeks) plan.push(dose);
-      }
-    });
-
-    if (plan.length === 0) {
-      plan.push('5');
-    }
-
-    while (plan.length < totalWeeks) {
-      plan.push(plan[plan.length - 1]);
-    }
-
-    plan.splice(totalWeeks);
-
-    weeklySelects.forEach((select, idx) => {
-      const value = plan[idx] ?? plan[plan.length - 1];
-      select.value = value;
-    });
-
-    syncWeeklyPlanString();
-  }
-
-  function highlightCurrentWeek(weekIndex) {
-    weeklyRows.forEach(row => {
-      const isCurrent = typeof weekIndex === 'number' && Number(row.dataset.week) === weekIndex;
-      row.classList.toggle('current-week', isCurrent);
-      row.setAttribute('aria-current', isCurrent ? 'true' : 'false');
-    });
-  }
-
-  function describeCurrentWeek(message) {
-    if (!currentWeekIndicator) return;
-    currentWeekIndicator.textContent = message;
-  }
-
-  function calculateCurrentWeek() {
-    const totalWeeks = parseInt(periodWeeksInput?.value || '0', 10);
-    if (!Number.isFinite(totalWeeks) || totalWeeks <= 0) {
-      describeCurrentWeek('예상 진행 기간(주)을 입력하면 현재 주차를 계산합니다.');
-      highlightCurrentWeek(undefined);
-      return;
-    }
-
-    const startDateValue = startDateInput?.value;
-    let currentWeekIndex = 1;
-    if (startDateValue) {
-      const startDate = new Date(`${startDateValue}T00:00:00`);
-      if (!Number.isNaN(startDate.getTime())) {
-        const today = new Date();
-        const diffDays = Math.floor((today - startDate) / (1000 * 60 * 60 * 24));
-        currentWeekIndex = Math.floor(diffDays / 7) + 1;
-      }
-    }
-
-    if (currentWeekIndex < 1) currentWeekIndex = 1;
-    if (currentWeekIndex > totalWeeks) currentWeekIndex = totalWeeks;
-
-    const indicatorText = startDateValue
-      ? `현재 ${currentWeekIndex}주차 (총 ${totalWeeks}주 중)`
-      : `총 ${totalWeeks}주 플랜입니다. 시작일을 입력하면 현재 주차를 계산합니다.`;
-
-    describeCurrentWeek(indicatorText);
-    highlightCurrentWeek(currentWeekIndex);
-  }
-
-  if (form && overlay) {
-    form.addEventListener('submit', () => {
-      syncWeeklyPlanString();
-      overlay.classList.add('active');
-    });
-  }
-
-  weeklySelects.forEach(select => select.addEventListener('change', syncWeeklyPlanString));
-  doseCountSelects.forEach(select => select.addEventListener('change', applyDoseCountsToWeeklyPlan));
-  startDateInput?.addEventListener('change', calculateCurrentWeek);
-  startDateInput?.addEventListener('blur', calculateCurrentWeek);
-  periodWeeksInput?.addEventListener('input', calculateCurrentWeek);
-  weeklyPlanTemplate?.addEventListener('change', (event) => {
-    applyTemplate(event.target.value);
-  });
-
-  syncWeeklyPlanString();
-  syncTemplateSelector();
-  if (autoTitrationInput?.checked && (!weeklyPlanHidden?.value || weeklyPlanHidden.value.trim() === '')) {
-    const recommended = weeklyPlanTemplate?.options?.[1]?.value;
-    if (recommended) {
-      applyTemplate(recommended);
-      weeklyPlanTemplate.value = recommended;
-    }
-  }
-  calculateCurrentWeek();
-
-  // 감량 그래프
-  const projectionData = {{ (report.weight_projection if report else []) | tojson }};
-
-  if (Array.isArray(projectionData) && projectionData.length > 1) {
-    const canvas = document.getElementById('projectionChart');
-    if (canvas) {
-      const ctx = canvas.getContext('2d');
-      const labels = projectionData.map(p => p.label || `${p.week_index}주차`);
-      const weights = projectionData.map(p => p.expected_weight_kg ?? p.weight);
-
-      new Chart(ctx, {
-        type: 'line',
-        data: {
-          labels,
-          datasets: [{
-            label: '예상 체중(kg)',
-            data: weights,
-            borderColor: '#2563eb',
-            backgroundColor: 'rgba(37, 99, 235, 0.15)',
-            fill: true,
-            tension: 0.3
-          }]
-        },
-        options: {
-          plugins: { legend: { display: false } },
-          scales: {
-            y: { beginAtZero: false }
-          }
+    <script>
+        function showTab(contentId, clickedButton) {
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+            document.querySelectorAll('.tab-button').forEach(button => button.classList.remove('active'));
+            
+            document.getElementById(contentId).classList.add('active');
+            clickedButton.classList.add('active');
         }
-      });
-    }
-  }
-</script>
+
+        document.addEventListener('DOMContentLoaded', function() {
+            const activeTab = "{{ active_tab or 'input' }}";
+            if (activeTab === 'results') {
+                document.getElementById('btn-results').click();
+            } else {
+                document.getElementById('btn-input').click();
+            }
+
+            const periodWeeksInput = document.getElementById('period_weeks');
+            if (periodWeeksInput) {
+                periodWeeksInput.addEventListener('input', updateWeeklyDosePlan);
+            }
+
+            // 결과 탭에 있을 때만 차트 렌더링
+            if (activeTab === 'results') {
+                renderWeightChart();
+            }
+        });
+
+        function updateWeeklyDosePlan() {
+            const periodWeeksInput = document.getElementById('period_weeks');
+            const container = document.querySelector('.dose-plan-grid');
+            const newWeeks = parseInt(periodWeeksInput.value, 10);
+            
+            const doseOptions = {{ dose_options|tojson|safe }};
+            // 일반적인 증량 패턴을 기본값으로 사용
+            const defaultPattern = [
+                "2.5", "2.5", "2.5", "2.5", 
+                "5", "5", "5", "5", 
+                "7.5", "7.5", "7.5", "7.5",
+                "10", "10", "10", "10",
+                "12.5", "12.5", "12.5", "12.5",
+                "15" // 이후는 15으로 유지
+            ];
+
+            if (isNaN(newWeeks) || newWeeks < 1 || newWeeks > 52) {
+                container.innerHTML = '<p class="form-note" style="color: red;">1에서 52 사이의 숫자를 입력하세요.</p>';
+                return;
+            }
+
+            const existingSelects = container.querySelectorAll('select');
+            const existingValues = Array.from(existingSelects).map(s => s.value);
+
+            let newHtml = '';
+            for (let i = 0; i < newWeeks; i++) {
+                const weekNum = i + 1;
+                const selectedValue = (i < existingValues.length) ? existingValues[i] : (defaultPattern[i] || "15");
+                
+                newHtml += `
+                    <div class="dose-week-item">
+                        <label><strong>${weekNum}주차</strong></label>
+                        <select name="weekly_dose_plan[]">
+                            ${doseOptions.map(dose => 
+                                `<option value="${dose}" ${dose === selectedValue ? 'selected' : ''}>${dose} mg</option>`
+                            ).join('')}
+                        </select>
+                    </div>
+                `;
+            }
+            container.innerHTML = newHtml;
+        }
+
+        function showProjectionView(view, clickedButton) {
+            document.getElementById('projection-table-view').style.display = (view === 'table') ? 'block' : 'none';
+            document.getElementById('projection-graph-view').style.display = (view === 'graph') ? 'block' : 'none';
+            
+            document.querySelectorAll('.view-toggle button').forEach(btn => btn.classList.remove('active'));
+            clickedButton.classList.add('active');
+        }
+
+        function renderWeightChart() {
+            const projectionData = {{ report.weight_projection|tojson|safe if report and report.weight_projection else 'null' }};
+            if (!projectionData || projectionData.length === 0) return;
+
+            const labels = projectionData.map(p => p.label);
+            const weights = projectionData.map(p => p.expected_weight_kg);
+
+            const ctx = document.getElementById('weightChart').getContext('2d');
+            if(window.myWeightChart) { // 이전 차트가 있으면 파괴
+                window.myWeightChart.destroy();
+            }
+            window.myWeightChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: '예상 체중 (kg)',
+                        data: weights,
+                        borderColor: '#007bff',
+                        backgroundColor: 'rgba(0, 123, 255, 0.1)',
+                        fill: true,
+                        tension: 0.1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    scales: {
+                        y: { beginAtZero: false }
+                    }
+                }
+            });
+        }
+
+        function applyTitrationPattern() {
+            const selects = document.querySelectorAll('.dose-plan-grid select[name="weekly_dose_plan[]"]');
+            selects.forEach((select, index) => {
+                let dose;
+                if (index < 4) { // 1-4주
+                    dose = "2.5";
+                } else if (index < 8) { // 5-8주
+                    dose = "5";
+                } else if (index < 12) { // 9-12주
+                    dose = "7.5";
+                } else if (index < 16) { // 13-16주
+                    dose = "10";
+                } else { // 17주차 이후는 5mg으로 설정
+                    dose = "5";
+                }
+                select.value = dose;
+            });
+        }
+
+        function unifyWithFirstWeekDose() {
+            const selects = document.querySelectorAll('.dose-plan-grid select[name="weekly_dose_plan[]"]');
+            if (selects.length === 0) return;
+            
+            const firstWeekDose = selects[0].value;
+            selects.forEach(select => {
+                select.value = firstWeekDose;
+            });
+        }
+
+        function applyTitrationAndMaintain5mg() {
+            applyTitrationPattern();
+            const maintenanceDoseSelect = document.querySelector('select[name="maintenance_dose"]');
+            if (maintenanceDoseSelect) {
+                maintenanceDoseSelect.value = "5";
+            }
+        }
+    </script>
 </body>
 </html>

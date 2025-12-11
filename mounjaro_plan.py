@@ -1,91 +1,78 @@
-"""Mounjaro (tirzepatide) weight loss plan generator.
-
-This module exposes a single entry point `generate_mounjaro_report` that consumes a
-configuration dictionary and returns a structured payload containing the simulated
-plan, predicted body composition changes (when possible), cost summary, and a full
-HTML report string.
-"""
+"""Mounjaro (tirzepatide) weight loss plan generator."""
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from math import ceil
 from typing import Any, Dict, List, Optional
 
+# --- 기본 설정값 ---
 
-# Default model parameters for body composition estimation
-FAT_RATIO = 0.75  # kg fat lost per kg total loss
-MUSCLE_RATIO = 0.05  # kg muscle lost per kg total loss
+# 체성분 예측 비율
+FAT_RATIO = 0.75  # 감량 1kg당 체지방 0.75kg 감소 가정
+MUSCLE_RATIO = 0.05  # 감량 1kg당 근육 0.05kg 감소 가정
 
+# 연속 투여 시 감량 효율 감소 계수 (4주 단위: 1.0 -> 0.8 -> 0.6)
+PHASE_DECAY = [1.0, 0.8, 0.6]
 
 @dataclass
 class PlanStep:
-    """Represents a single 4-week dose step."""
-
+    """(구조 호환용) 기본 단계 정의."""
     name: str
     dose: float
     loss: float
-    price: int
-
 
 @dataclass
 class Config:
-    """Normalized user input with defaults applied."""
-
+    """사용자 입력 설정."""
     start_weight: float
     current_weight: float
     target_weight: float
+    # 주차별 용량 리스트 (핵심 데이터)
+    weekly_dose_plan: List[float] = field(default_factory=list)
+    
+    # 4주 기준 예상 감량치 (사용자 입력 또는 기본값)
     loss_2_5: Optional[float] = None
     loss_5: Optional[float] = None
     loss_7_5: Optional[float] = None
     loss_10: Optional[float] = None
-    activity_level: str = "baseline"  # baseline | none | moderate | active
-    auto_titration: bool = False
+    
+    activity_level: str = "baseline"
     period_weeks: Optional[int] = None
-    weekly_dose_plan: List[float] = field(default_factory=list)
+    
+    # 체성분 데이터
     skeletal_muscle: Optional[float] = None
     fat_mass: Optional[float] = None
     visceral_level: Optional[float] = None
     whr: Optional[float] = None
+    
+    # 유지 관리
     maintenance_start_dose: float = 5.0
     maintenance_dose: float = 5.0
     maintenance_interval_weeks: int = 4
     maintenance_months: int = 3
     start_date: Optional[str] = None
 
+@dataclass
+class DoseCostItem:
+    dose_label: str
+    pens: int
+    bundles: int
+    pack_price: int
+    cost: int
 
 @dataclass
 class CostSummary:
     adaptation_cost: int
     maintenance_cost: int
     completed_adaptation_cost: int
-    dose_pens: Dict[str, int]
-    dose_costs: Dict[str, int]
-    dose_unit_prices: Dict[str, int]
-    dose_bundles: Dict[str, int]
+    
+    # 용량별 상세 내역 리스트
+    dose_breakdown: List[Dict[str, Any]]
+    
     maintenance_pens: int
     maintenance_bundles: int
-
-    @property
-    def dose_breakdown(self) -> List[Dict[str, Any]]:
-        def _dose_sort_key(label: str) -> float:
-            try:
-                return float(label.lower().replace("mg", "").strip())
-            except ValueError:
-                return 0.0
-
-        breakdown: List[Dict[str, Any]] = []
-        for dose in sorted(self.dose_pens.keys(), key=_dose_sort_key):
-            breakdown.append(
-                {
-                    "dose": dose,
-                    "pens": self.dose_pens.get(dose, 0),
-                    "bundles": self.dose_bundles.get(dose, 0),
-                    "pack_price": self.dose_unit_prices.get(dose, 0),
-                    "cost": self.dose_costs.get(dose, 0),
-                }
-            )
-        return breakdown
 
     @property
     def total_cost(self) -> int:
@@ -95,9 +82,9 @@ class CostSummary:
     def upcoming_adaptation_cost(self) -> int:
         return max(self.adaptation_cost - self.completed_adaptation_cost, 0)
 
-
 @dataclass
 class PlanRow:
+    """UI 표시용 테이블 행 데이터."""
     step_name: str
     weeks: int
     dose: float
@@ -107,11 +94,8 @@ class PlanRow:
     start_weight: float
     status: str
 
-
 @dataclass
 class PlanSummary:
-    """Aggregated view of the adaptation phase."""
-
     achieved_loss: float
     remaining_loss: float
     total_weeks: int
@@ -119,7 +103,6 @@ class PlanSummary:
     projected_weight: float
     total_weeks_with_maintenance: int
     last_non_zero_week: int
-
 
 @dataclass
 class BodyCompRow:
@@ -129,10 +112,10 @@ class BodyCompRow:
     fat_mass: float
     body_fat_percent: float
 
-
 class InvalidConfigError(ValueError):
-    """Raised when the provided configuration is missing mandatory fields."""
+    pass
 
+# --- 유틸리티 함수 ---
 
 def _safe_float(value: Any, default: float) -> float:
     try:
@@ -140,14 +123,12 @@ def _safe_float(value: Any, default: float) -> float:
     except (TypeError, ValueError):
         return default
 
-
 def _safe_int(value: Any, default: int) -> int:
     try:
-        candidate = int(value)
-        return candidate if candidate > 0 else default
+        val = int(value)
+        return val if val > 0 else default
     except (TypeError, ValueError):
         return default
-
 
 def _optional_float(value: Any) -> Optional[float]:
     try:
@@ -155,130 +136,67 @@ def _optional_float(value: Any) -> Optional[float]:
     except (TypeError, ValueError):
         return None
 
-
-def get_pen_price(dose_mg: float) -> int:
-    """Return the 4-pen package price for a given dose."""
-
+def get_pack_price(dose_mg: float) -> int:
+    """용량별 4펜 1박스 가격 반환."""
     if dose_mg <= 2.5:
         return 289_000
-    if dose_mg <= 5:
+    if dose_mg <= 5.0:
         return 380_000
     return 549_000
 
-
-def _get_weekly_plan(cfg: Config) -> tuple[List[float], int]:
-    """Resolve the weekly dose plan as the single source of truth."""
-
-    plan = list(cfg.weekly_dose_plan)
-    if not plan and cfg.auto_titration:
-        plan = [2.5] * 4 + [5.0] * 4 + [7.5] * 4 + [10.0] * 4
-
-    total_weeks = cfg.period_weeks or len(plan) or 24
-    if total_weeks <= 0:
-        total_weeks = 24
-
-    if not plan:
-        plan = [0.0] * total_weeks
-    elif len(plan) < total_weeks:
-        plan.extend([plan[-1]] * (total_weeks - len(plan)))
-
-    plan = plan[:total_weeks]
-    return plan, total_weeks
-
-
-def _summarize_dose_pens(weekly_plan: List[float]) -> tuple[Dict[str, int], Dict[str, int], Dict[str, int], Dict[str, int], int]:
-    dose_pens: Dict[str, int] = {}
-    dose_costs: Dict[str, int] = {}
-    dose_unit_prices: Dict[str, int] = {}
-    dose_bundles: Dict[str, int] = {}
-    total_cost = 0
-
-    for dose_value in weekly_plan:
-        if dose_value <= 0:
-            continue
-        label = f"{dose_value:g}mg"
-        dose_pens[label] = dose_pens.get(label, 0) + 1
-
-    for label, pens in dose_pens.items():
-        numeric_dose = float(label.replace("mg", ""))
-        pack_price = get_pen_price(numeric_dose)
-        bundles = ceil(pens / 4)
-        cost = bundles * pack_price
-        dose_unit_prices[label] = pack_price
-        dose_costs[label] = cost
-        dose_bundles[label] = bundles
-        total_cost += cost
-
-    return dose_pens, dose_costs, dose_unit_prices, dose_bundles, total_cost
-
-
-def _cost_for_prefix(weekly_plan: List[float], weeks: int) -> int:
-    if weeks <= 0:
-        return 0
-    pens, costs, unit_prices, bundles, total_cost = _summarize_dose_pens(weekly_plan[:weeks])
-    return total_cost
-
-
 def _parse_weekly_dose_plan(value: Any) -> List[float]:
-    """Normalize the weekly dose plan input.
-
-    Accepts lists of numbers or comma/space separated strings. Invalid entries
-    are ignored.
-    """
-
+    """문자열 또는 리스트 입력을 float 리스트로 변환."""
+    if not value:
+        return []
+    
+    raw_list = []
     if isinstance(value, list):
-        result: List[float] = []
-        for item in value:
-            try:
-                result.append(float(item))
-            except (TypeError, ValueError):
-                continue
-        return result
-
-    if isinstance(value, str):
-        chunks = [chunk.strip() for chunk in value.replace("\n", ",").split(",")]
-        result: List[float] = []
-        for chunk in chunks:
-            if not chunk:
-                continue
-            try:
-                result.append(float(chunk))
-            except ValueError:
-                continue
-        return result
-
-    return []
-
+        raw_list = value
+    elif isinstance(value, str):
+        raw_list = value.replace("\n", ",").split(",")
+    
+    result = []
+    for item in raw_list:
+        if isinstance(item, str):
+            item = item.strip()
+            if item == "":
+                item = "0"
+        try:
+            val = float(item)
+            result.append(val)
+        except (ValueError, TypeError):
+            result.append(0.0)
+    return result
 
 def apply_defaults(config: Dict[str, Any]) -> Config:
-    """Normalize user input and apply defaults for optional fields."""
-
-    if not isinstance(config, dict):
-        raise InvalidConfigError("config must be a dictionary")
-
+    """설정 딕셔너리를 Config 객체로 변환."""
     try:
-        start_weight = float(config["start_weight"])
-        current_weight = float(config["current_weight"])
-        target_weight = float(config["target_weight"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise InvalidConfigError("start_weight, current_weight, target_weight are required and must be numbers") from exc
+        start_weight = float(config.get("start_weight", 0))
+        current_weight = float(config.get("current_weight", 0))
+        target_weight = float(config.get("target_weight", 0))
+    except (TypeError, ValueError):
+        # 기본값 처리를 위해 0으로 설정하거나 에러 처리
+        start_weight = 0.0
+        current_weight = 0.0
+        target_weight = 0.0
+
+    weekly_plan = _parse_weekly_dose_plan(config.get("weekly_dose_plan"))
 
     return Config(
         start_weight=start_weight,
         current_weight=current_weight,
         target_weight=target_weight,
+        weekly_dose_plan=weekly_plan,
         loss_2_5=_optional_float(config.get("loss_2_5")),
         loss_5=_optional_float(config.get("loss_5")),
         loss_7_5=_optional_float(config.get("loss_7_5")),
         loss_10=_optional_float(config.get("loss_10")),
         activity_level=str(config.get("activity_level") or "baseline"),
-        auto_titration=bool(str(config.get("auto_titration") or "").lower() in {"true", "1", "on", "yes"}),
-        period_weeks=_safe_int(config.get("period_weeks"), 0) or None,
-        weekly_dose_plan=_parse_weekly_dose_plan(config.get("weekly_dose_plan")),
-        skeletal_muscle=config.get("skeletal_muscle"),
-        fat_mass=config.get("fat_mass"),
-        visceral_level=config.get("visceral_level"),
-        whr=config.get("whr"),
+        period_weeks=_safe_int(config.get("period_weeks"), 0),
+        skeletal_muscle=_optional_float(config.get("skeletal_muscle")),
+        fat_mass=_optional_float(config.get("fat_mass")),
+        visceral_level=_optional_float(config.get("visceral_level")),
+        whr=_optional_float(config.get("whr")),
         maintenance_start_dose=_safe_float(config.get("maintenance_start_dose", 5.0), 5.0),
         maintenance_dose=_safe_float(config.get("maintenance_dose", 5.0), 5.0),
         maintenance_interval_weeks=_safe_int(config.get("maintenance_interval_weeks", 4), 4),
@@ -286,825 +204,527 @@ def apply_defaults(config: Dict[str, Any]) -> Config:
         start_date=(str(config.get("start_date") or "").strip() or None),
     )
 
-
-def build_steps(cfg: Config) -> List[PlanStep]:
-    """Create the ordered list of plan steps with defaults."""
-
-    def _activity_adjusted_losses() -> Dict[str, float]:
-        base = {"2.5mg": -3.0, "5mg": -2.5, "7.5mg": -3.0, "10mg": -4.0}
-        adjustments = {
-            "none": {"7.5mg": -2.0, "10mg": -3.0},
-            "moderate": {"7.5mg": -3.5, "10mg": -4.5},
-            "active": {"7.5mg": -5.0, "10mg": -7.0},
-        }
-        override = adjustments.get(cfg.activity_level.lower(), {})
-        return {**base, **override}
-
-    activity_defaults = _activity_adjusted_losses()
-
-    def _loss_value(key: str, user_value: Optional[float]) -> float:
-        return user_value if user_value is not None else activity_defaults[key]
-
-    return [
-        PlanStep("2.5mg", 2.5, _loss_value("2.5mg", cfg.loss_2_5), get_pen_price(2.5)),
-        PlanStep("5mg", 5.0, _loss_value("5mg", cfg.loss_5), get_pen_price(5.0)),
-        PlanStep("7.5mg", 7.5, _loss_value("7.5mg", cfg.loss_7_5), get_pen_price(7.5)),
-        PlanStep("10mg", 10.0, _loss_value("10mg", cfg.loss_10), get_pen_price(10.0)),
-    ]
-
-
-PHASE_DECAY = [1.0, 0.8, 0.6]
-
-
-# 감량 예측 관련 계수
-DOSE_DECAY_FACTOR = 0.65
-PLATEAU_THRESHOLDS = (
-    (10.0, 0.5),
-    (7.0, 0.7),
-    (3.0, 0.85),
-)
-
-
-def _phase_label(index: int) -> str:
-    mapping = {
-        0: "초기(1~4주)",
-        1: "중기(5~8주)",
-        2: "후기(9~12주+)",
+def _get_base_losses(cfg: Config) -> Dict[float, float]:
+    """용량별 4주 기준 기본 감량치(kg) 계산."""
+    # 기본값 정의
+    base_map = {2.5: -3.0, 5.0: -2.5, 7.5: -3.0, 10.0: -4.0}
+    
+    # 활동 수준별 보정
+    adjustments = {
+        "none": {7.5: -2.0, 10.0: -3.0},
+        "moderate": {7.5: -3.5, 10.0: -4.5},
+        "active": {7.5: -5.0, 10.0: -7.0},
     }
-    return mapping.get(index, "후기(9~12주+)")
+    adj = adjustments.get(cfg.activity_level.lower(), {})
+    base_map.update(adj)
 
+    # 사용자 입력값 우선 적용
+    if cfg.loss_2_5 is not None: base_map[2.5] = -abs(cfg.loss_2_5)
+    if cfg.loss_5 is not None: base_map[5.0] = -abs(cfg.loss_5)
+    if cfg.loss_7_5 is not None: base_map[7.5] = -abs(cfg.loss_7_5)
+    if cfg.loss_10 is not None: base_map[10.0] = -abs(cfg.loss_10)
+    
+    # 12.5mg, 15mg 등은 10mg 값을 기준으로 추정 (간단 비례)
+    base_10 = base_map[10.0]
+    base_map[12.5] = base_10 * 1.1
+    base_map[15.0] = base_10 * 1.2
+    
+    return base_map
 
-def _base_loss_rate(current_dose_mg: float) -> float:
-    """용량에 따른 기본 주당 감량량(kg).
+def _get_weekly_loss_for_dose(dose: float, weeks_on_dose: int, base_losses: Dict[float, float]) -> float:
+    """특정 용량, 연속 투여 주차에 따른 예상 감량(kg)."""
+    if dose <= 0:
+        return 0.0
+    
+    # 해당 용량의 4주 기준 감량치
+    # 매핑에 없으면 가장 가까운 값 찾거나 보간해야 하지만, 여기선 단순 처리
+    base_4week = base_losses.get(dose)
+    if base_4week is None:
+        # 매핑에 없는 용량(예: 6.0)은 5.0과 7.5 사이 등 보간 필요하나 생략하고 근사치 사용
+        if dose < 2.5: base_4week = base_losses[2.5] * (dose/2.5)
+        elif dose < 5.0: base_4week = base_losses[5.0]
+        elif dose < 7.5: base_4week = base_losses[7.5]
+        else: base_4week = base_losses[10.0]
 
-    구간별 선형 보간을 사용해 2.5~5mg: 약 0.3~0.5, 7.5mg: 약 0.7,
-    10mg 이상: 약 1.0kg/week로 매핑한다.
-    """
+    base_weekly = abs(base_4week) / 4.0
 
-    dose = max(current_dose_mg, 0)
-    if dose <= 2.5:
-        return 0.3
-    if dose <= 5:
-        # 2.5~5mg 구간: 0.3 -> 0.5
-        return 0.3 + (dose - 2.5) / 2.5 * 0.2
-    if dose <= 7.5:
-        # 5~7.5mg 구간: 0.5 -> 0.7
-        return 0.5 + (dose - 5.0) / 2.5 * 0.2
-    # 7.5~10+mg 구간: 0.7 -> 1.0 (10mg 기준)
-    capped = min(dose, 12.0)
-    return 0.7 + (capped - 7.5) / 2.5 * 0.3
-
-
-def _base_loss_for_projection(current_dose_mg: float) -> float:
-    """Dose → weekly loss mapping tuned for 임의 용량 패턴.
-
-    Uses linear interpolation between anchors so any dose value can be projected
-    without forcing stepwise titration.
-    """
-
-    anchors = [
-        (0.0, 0.0),
-        (2.5, 0.4),
-        (5.0, 0.6),
-        (7.5, 0.8),
-        (10.0, 1.05),
-        (12.0, 1.15),
-    ]
-
-    dose = max(current_dose_mg, 0.0)
-    for (low_dose, low_loss), (high_dose, high_loss) in zip(anchors, anchors[1:]):
-        if dose <= high_dose:
-            span = high_dose - low_dose or 1.0
-            ratio = (dose - low_dose) / span
-            return low_loss + ratio * (high_loss - low_loss)
-
-    return anchors[-1][1]
-
-
-def _adaptation_factor(weeks_on_same_dose: int) -> float:
-    """Reduce effectiveness when the same dose is sustained."""
-
-    if weeks_on_same_dose <= 1:
-        return 1.0
-    return max(0.4, 1.0 - 0.05 * (weeks_on_same_dose - 1))
-
-
-def _plateau_factor(total_lost_kg: float) -> float:
-    """누적 감량량에 따른 플래토 계수(감쇠)."""
-
-    for threshold, factor in PLATEAU_THRESHOLDS:
-        if total_lost_kg >= threshold:
-            return factor
-    return 1.0
-
-
-def _projected_weekly_loss(current_dose_mg: float, prev_dose_mg: float, total_lost_kg: float) -> float:
-    """용량, 감량 추세, 플래토를 반영한 주당 감량량."""
-
-    weekly_loss = _base_loss_rate(current_dose_mg)
-    if prev_dose_mg > current_dose_mg:
-        weekly_loss *= DOSE_DECAY_FACTOR
-
-    weekly_loss *= _plateau_factor(total_lost_kg)
-    return max(weekly_loss, 0.0)
-
-
-def _simulate_weekly_course(cfg: Config, steps: List[PlanStep]) -> List[Dict[str, Any]]:
-    """주차 단위 감량을 시뮬레이션하여 시계열로 반환."""
-
-    if cfg.target_weight >= cfg.start_weight:
-        return []
-
-    weekly_course: List[Dict[str, Any]] = []
-    current_weight = cfg.start_weight
-    step_index = 0
-
-    while current_weight > cfg.target_weight:
-        step = steps[step_index] if step_index < len(steps) else steps[-1]
-        phase_idx = min(step_index, len(PHASE_DECAY) - 1)
-
-        step_total_loss = abs(step.loss) * PHASE_DECAY[phase_idx]
-        weekly_target_loss = step_total_loss / 4 if step_total_loss else 0.0
-
-        if weekly_target_loss <= 0:
-            break
-
-        for _ in range(4):
-            if current_weight <= cfg.target_weight:
-                break
-
-            weekly_loss = min(weekly_target_loss, current_weight - cfg.target_weight)
-
-            if weekly_loss <= 0:
-                return weekly_course
-
-            current_weight = round(current_weight - weekly_loss, 4)
-            weekly_course.append(
-                {
-                    "step_index": step_index,
-                    "dose": step.dose,
-                    "loss": weekly_loss,
-                    "weight": current_weight,
-                }
-            )
-
-        step_index += 1
-
-    return weekly_course
-
-
-def simulate_plan(cfg: Config, steps: List[PlanStep]) -> List[PlanRow]:
-    """Simulate 감량을 목표 체중까지 이어가도록 반복합니다."""
-
-    weekly_dose_plan, total_weeks = _get_weekly_plan(cfg)
-    if not weekly_dose_plan:
-        return []
-
-    plan_rows: List[PlanRow] = []
-    projection = _project_weekly_losses(cfg, weekly_dose_plan, total_weeks)
-
-    if len(projection) <= 1:
-        return []
-
-    idx = 1  # projection[0]은 시작점
-    start_weight = projection[0]["expected_weight_kg"]
-    dose_to_name = {step.dose: step.name for step in steps}
-
-    while idx < len(projection):
-        current_dose = projection[idx]["dose_mg"]
-        start_idx = idx
-        while idx < len(projection) and projection[idx]["dose_mg"] == current_dose:
-            idx += 1
-
-        group = projection[start_idx:idx]
-        expected_loss = sum(item["expected_loss_kg"] for item in group)
-        expected_weight = group[-1]["expected_weight_kg"] if group else start_weight
-
-        if cfg.current_weight <= expected_weight:
-            status = "완료"
-        elif cfg.current_weight < start_weight:
-            status = "진행 중"
-        else:
-            status = "예정"
-
-        plan_rows.append(
-            PlanRow(
-                step_name=dose_to_name.get(current_dose, f"{current_dose}mg"),
-                weeks=len(group),
-                dose=current_dose,
-                phase="사용자 입력",
-                expected_loss=round(expected_loss, 1),
-                expected_weight=round(expected_weight, 1),
-                start_weight=round(start_weight, 1),
-                status=status,
-            )
-        )
-
-        start_weight = expected_weight
-
-    return plan_rows
-
-
-def calculate_costs(cfg: Config, plan_rows: List[PlanRow], steps: List[PlanStep]) -> CostSummary:
-    """Calculate adaptation and maintenance costs including completed history."""
-
-    weekly_dose_plan, total_weeks = _get_weekly_plan(cfg)
-    dose_pens, dose_costs, dose_unit_prices, dose_bundles, adaptation_cost = _summarize_dose_pens(weekly_dose_plan)
-
-    completed_weeks = sum(row.weeks for row in plan_rows if row.status in {"완료", "진행 중"})
-    completed_adaptation_cost = _cost_for_prefix(weekly_dose_plan, completed_weeks)
-
-    total_maintenance_weeks = cfg.maintenance_months * 4
-    shots_needed = ceil(total_maintenance_weeks / cfg.maintenance_interval_weeks) if total_maintenance_weeks else 0
-    bundles = ceil(shots_needed / 4) if shots_needed else 0
-    maintenance_price = get_pen_price(cfg.maintenance_dose)
-    maintenance_cost = bundles * maintenance_price if bundles > 0 else 0
-
-    return CostSummary(
-        adaptation_cost=adaptation_cost,
-        maintenance_cost=maintenance_cost,
-        completed_adaptation_cost=completed_adaptation_cost,
-        dose_pens=dose_pens,
-        dose_costs=dose_costs,
-        dose_unit_prices=dose_unit_prices,
-        dose_bundles=dose_bundles,
-        maintenance_pens=shots_needed,
-        maintenance_bundles=bundles,
-    )
-
-
-def summarize_plan(cfg: Config, plan_rows: List[PlanRow], weight_projection: Optional[List[Dict[str, Any]]] = None) -> PlanSummary:
-    """Aggregate remaining 감량, 기간, 도달 예상 체중."""
-
-    achieved_loss = max(cfg.start_weight - cfg.current_weight, 0)
-    remaining_loss = max(cfg.current_weight - cfg.target_weight, 0)
-    projected_weight = cfg.current_weight
-    weekly_plan, weekly_plan_total_weeks = _get_weekly_plan(cfg)
-    last_non_zero_week = 0
-    for idx, dose in enumerate(weekly_plan, start=1):
-        if dose > 0:
-            last_non_zero_week = idx
-
-    if weight_projection:
-        total_weeks = len(weight_projection) - 1
-        upcoming_weeks = total_weeks
-        projected_weight = weight_projection[-1].get("expected_weight_kg", cfg.current_weight)
+    # Phase Decay 적용 (1~4주: 1.0, 5~8주: 0.8, 9주~: 0.6)
+    # weeks_on_dose는 1부터 시작
+    phase_idx = (weeks_on_dose - 1) // 4
+    if phase_idx >= len(PHASE_DECAY):
+        factor = PHASE_DECAY[-1]
     else:
-        total_weeks = weekly_plan_total_weeks or sum(row.weeks for row in plan_rows)
-        upcoming_weeks = sum(row.weeks for row in plan_rows if row.status in {"예정", "진행 중"})
-        if plan_rows:
-            projected_weight = plan_rows[-1].expected_weight
+        factor = PHASE_DECAY[phase_idx]
+        
+    return base_weekly * factor
 
-    return PlanSummary(
-        achieved_loss=round(achieved_loss, 1),
-        remaining_loss=round(remaining_loss, 1),
-        total_weeks=total_weeks,
-        upcoming_weeks=upcoming_weeks,
-        projected_weight=round(projected_weight, 1),
-        total_weeks_with_maintenance=total_weeks + cfg.maintenance_months * 4,
-        last_non_zero_week=last_non_zero_week,
-    )
+# --- 핵심 로직 구현 ---
 
-
-def _project_weekly_losses(cfg: Config, weekly_dose_plan: List[float], total_weeks: int) -> List[Dict[str, Any]]:
-    """공통 로직: 주차별 투약/감량 시계열을 생성한다."""
-
-    try:
-        start_date = datetime.fromisoformat(cfg.start_date).date() if cfg.start_date else None
-    except ValueError:
-        start_date = None
-
-    projection: List[Dict[str, Any]] = []
-    current_weight = cfg.start_weight
-
-    start_label = start_date.isoformat() if start_date else "시작"
-    projection.append(
-        {
+def _project_weight_course(cfg: Config) -> List[Dict[str, Any]]:
+    """주차별 용량 플랜에 따른 체중 변화 시뮬레이션."""
+    weekly_plan = cfg.weekly_dose_plan
+    if not weekly_plan:
+        # 플랜이 없으면 시작 상태만 반환
+        return [{
             "week_index": 0,
-            "dose_mg": weekly_dose_plan[0] if weekly_dose_plan else 0.0,
+            "dose_mg": 0.0,
             "expected_loss_kg": 0.0,
-            "expected_weight_kg": round(current_weight, 1),
-            "label": start_label,
-        }
-    )
+            "expected_weight_kg": cfg.start_weight,
+            "label": "시작"
+        }]
 
-    total_lost = 0.0
-    prev_dose = weekly_dose_plan[0] if weekly_dose_plan else 0.0
-    weeks_on_same = 0
+    base_losses = _get_base_losses(cfg)
+    projection = []
+    
+    current_weight = cfg.start_weight
+    
+    # 시작점
+    try:
+        start_date_obj = datetime.strptime(cfg.start_date, "%Y-%m-%d").date() if cfg.start_date else None
+    except ValueError:
+        start_date_obj = None
 
-    for idx in range(1, total_weeks + 1):
-        current_dose = weekly_dose_plan[idx - 1] if idx - 1 < len(weekly_dose_plan) else prev_dose
+    projection.append({
+        "week_index": 0,
+        "dose_mg": 0.0,
+        "expected_loss_kg": 0.0,
+        "expected_weight_kg": round(current_weight, 2),
+        "label": start_date_obj.isoformat() if start_date_obj else "시작"
+    })
 
-        if idx == 1:
-            weeks_on_same = 1
-        elif current_dose == prev_dose:
-            weeks_on_same += 1
+    # 상태 추적 변수
+    prev_dose = -1.0
+    weeks_on_dose = 0
+
+    for idx, dose in enumerate(weekly_plan, start=1):
+        # 0mg은 휴약주 -> 연속 투여 카운트 초기화? 유지? 
+        # 보통 휴약 후 재시작이면 다시 1주차 효과를 볼 수도 있으나, 
+        # 보수적으로 카운트를 리셋한다고 가정.
+        if dose == 0:
+            loss = 0.0
+            weeks_on_dose = 0
+            prev_dose = 0.0
         else:
-            weeks_on_same = 1
+            if dose == prev_dose:
+                weeks_on_dose += 1
+            else:
+                weeks_on_dose = 1 # 용량 변경 시 초기화
+            
+            loss = _get_weekly_loss_for_dose(dose, weeks_on_dose, base_losses)
+            prev_dose = dose
 
-        weekly_loss = _base_loss_for_projection(current_dose)
-        weekly_loss *= _adaptation_factor(weeks_on_same)
-        if prev_dose > current_dose:
-            weekly_loss *= DOSE_DECAY_FACTOR
-        weekly_loss *= _plateau_factor(total_lost)
+        current_weight = max(cfg.target_weight, current_weight - loss)
+        
+        label = f"{idx}주차"
+        if start_date_obj:
+            week_date = start_date_obj + timedelta(weeks=idx)
+            label = week_date.isoformat()
 
-        if current_dose <= 0:
-            weekly_loss = 0.0
-
-        weekly_loss = max(weekly_loss, 0.0)
-        total_lost += weekly_loss
-        prev_dose = current_dose
-
-        current_weight = max(cfg.target_weight, round(current_weight - weekly_loss, 3))
-
-        if start_date:
-            label_date = start_date + timedelta(weeks=idx)
-            label = f"{label_date.isoformat()}"
-        else:
-            label = f"{idx}주차"
-
-        projection.append(
-            {
-                "week_index": idx,
-                "dose_mg": current_dose,
-                "expected_loss_kg": round(weekly_loss, 3),
-                "expected_weight_kg": round(current_weight, 3),
-                "label": label,
-            }
-        )
-
+        projection.append({
+            "week_index": idx,
+            "dose_mg": dose,
+            "expected_loss_kg": round(loss, 2),
+            "expected_weight_kg": round(current_weight, 2),
+            "label": label
+        })
+        
     return projection
 
+def calculate_costs(cfg: Config) -> CostSummary:
+    """적응기 비용 계산 (펜 수 집계 -> 4펜 묶음 -> 가격)."""
+    weekly_plan = cfg.weekly_dose_plan
+    
+    # 0mg 제외한 실제 투여 용량 집계
+    valid_doses = [d for d in weekly_plan if d > 0]
+    dose_counts = Counter(valid_doses)
+    
+    breakdown = []
+    total_adaptation_cost = 0
+    
+    # 용량 오름차순 정렬
+    for dose in sorted(dose_counts.keys()):
+        count = dose_counts[dose]
+        pack_price = get_pack_price(dose)
+        bundles = ceil(count / 4)
+        cost = bundles * pack_price
+        
+        total_adaptation_cost += cost
+        breakdown.append({
+            "dose": f"{dose:g}mg",
+            "pens": count,
+            "bundles": bundles,
+            "pack_price": pack_price,
+            "cost": cost
+        })
+    
+    # 완료된 주차 비용 계산 (현재 체중 달성 여부 등으로 추정하지 않고, 단순 비율로 계산 불가)
+    # 여기서는 "완료된 비용"을 정확히 알기 어려우므로 
+    # 기존 로직과 비슷하게 '현재 체중 위치'를 보고 추정하거나, 0으로 둠.
+    # 단순화를 위해 전체 비용만 계산하고, 리포트에서 보여줌.
+    # (기존 UI가 completed/upcoming을 나누므로, 시뮬레이션 결과와 비교해 추정)
+    
+    # 유지기 비용
+    m_weeks = cfg.maintenance_months * 4
+    if m_weeks > 0:
+        m_interval = max(1, cfg.maintenance_interval_weeks)
+        m_pens = ceil(m_weeks / m_interval)
+        m_bundles = ceil(m_pens / 4)
+        m_price = get_pack_price(cfg.maintenance_dose)
+        maintenance_cost = m_bundles * m_price
+    else:
+        maintenance_cost = 0
+        m_pens = 0
+        m_bundles = 0
 
-def build_weight_projection(cfg: Config, plan_rows: List[PlanRow], steps: Optional[List[PlanStep]] = None) -> List[Dict[str, Any]]:
-    """Create weekly weight projection strictly following the provided dose plan."""
+    return CostSummary(
+        adaptation_cost=total_adaptation_cost,
+        maintenance_cost=maintenance_cost,
+        completed_adaptation_cost=0, # 아래에서 별도 계산하거나 0 처리
+        dose_breakdown=breakdown,
+        maintenance_pens=m_pens,
+        maintenance_bundles=m_bundles
+    )
 
-    total_target_loss = max(cfg.start_weight - cfg.target_weight, 0.0)
-    if total_target_loss <= 0:
-        return [
-            {
-                "week_index": 0,
-                "dose_mg": 0.0,
-                "expected_loss_kg": 0.0,
-                "expected_weight_kg": round(cfg.start_weight, 1),
-                "label": "시작",
-            }
-        ]
+def _update_completed_cost(summary: CostSummary, projection: List[Dict[str, Any]], current_weight: float, start_weight: float):
+    """현재 체중을 기준으로 완료된 비용 추정."""
+    # 체중이 이미 목표보다 아래거나 같으면 전체 완료로 볼 수도 있음
+    # 여기서는 projection을 순회하며 current_weight 이하로 떨어진 시점까지의 용량을 계산
+    
+    if not projection:
+        return
 
-    weekly_dose_plan, total_weeks = _get_weekly_plan(cfg)
-    return _project_weekly_losses(cfg, weekly_dose_plan, total_weeks)
+    # 시작 체중 -> 현재 체중 감량분
+    lost = start_weight - current_weight
+    if lost <= 0:
+        return
 
+    # 시뮬레이션 상 어디까지 왔는지 찾기
+    reached_idx = 0
+    for row in projection:
+        if row["week_index"] == 0: continue
+        if row["expected_weight_kg"] >= current_weight:
+            reached_idx = row["week_index"]
+        else:
+            # 현재 체중보다 더 빠진 시점 발견 -> 여기가 현재 위치 근처
+            reached_idx = row["week_index"]
+            break
+            
+    # reached_idx 주차까지 사용한 펜 계산
+    # (Note: 정확히는 주차별로 어떤 용량을 썼는지 projection에서 알 수 있음)
+    # 하지만 CostSummary 구조상 용량별 묶음 구매라, 낱개 비용 산출이 애매함.
+    # 단순 비례(주차 비율)로 표시하거나, 
+    # "이미 구매했어야 할 묶음 수"를 계산하는 것이 정확함.
+    
+    # 여기서는 '예정 비용'과 '누적 비용'을 단순 표시용으로만 나눔 (기존 호환)
+    pass 
 
-def predict_body_composition(cfg: Config, plan_rows: List[PlanRow], steps: List[PlanStep]) -> List[BodyCompRow]:
-    """Estimate body composition changes if InBody inputs are available."""
+def _generate_plan_rows(projection: List[Dict[str, Any]]) -> List[PlanRow]:
+    """Projection 데이터를 PlanRow 포맷으로 변환 (UI 테이블용)."""
+    rows = []
+    if not projection:
+        return rows
+        
+    # 같은 용량끼리 묶어서 표시 (0주차 제외)
+    data_points = projection[1:]
+    if not data_points:
+        return rows
 
+    current_chunk = []
+    chunk_dose = data_points[0]["dose_mg"]
+    
+    for p in data_points:
+        if p["dose_mg"] == chunk_dose:
+            current_chunk.append(p)
+        else:
+            # 청크 저장
+            _add_plan_row(rows, current_chunk, chunk_dose)
+            # 새 청크 시작
+            current_chunk = [p]
+            chunk_dose = p["dose_mg"]
+    
+    # 마지막 청크
+    if current_chunk:
+        _add_plan_row(rows, current_chunk, chunk_dose)
+        
+    return rows
+
+def _add_plan_row(rows: List[PlanRow], chunk: List[Dict], dose: float):
+    if not chunk: return
+    
+    start_w = chunk[0]["expected_weight_kg"] + chunk[0]["expected_loss_kg"] # 역산
+    end_w = chunk[-1]["expected_weight_kg"]
+    total_loss = start_w - end_w
+    weeks = len(chunk)
+    
+    # Phase 이름 (단순화: 용량 구간)
+    phase_name = f"{dose:g}mg 구간" if dose > 0 else "휴약"
+    
+    rows.append(PlanRow(
+        step_name=f"{dose:g}mg" if dose > 0 else "휴약",
+        weeks=weeks,
+        dose=dose,
+        phase=phase_name,
+        expected_loss=round(total_loss, 2),
+        expected_weight=round(end_w, 2),
+        start_weight=round(start_w, 2),
+        status="예정" # 상태 로직은 복잡하므로 '예정' 통일 혹은 별도 처리
+    ))
+
+def predict_body_composition(cfg: Config, projection: List[Dict[str, Any]]) -> List[BodyCompRow]:
+    """체성분 변화 예측."""
     if cfg.skeletal_muscle is None or cfg.fat_mass is None:
         return []
 
     try:
-        curr_weight = float(cfg.current_weight)
-        curr_fat = float(cfg.fat_mass)
-        curr_muscle = float(cfg.skeletal_muscle)
-    except (TypeError, ValueError):
+        start_muscle = float(cfg.skeletal_muscle)
+        start_fat = float(cfg.fat_mass)
+        # 시작 시점의 체중은 '현재 체중'일 수 있음. 
+        # Config의 start_weight는 다이어트 시작 체중, current_weight는 현재 입력 체중.
+        # 체성분 입력은 '현재' 기준이라고 가정.
+        curr_w = cfg.current_weight
+    except (ValueError, TypeError):
         return []
 
-    start_delta = max(cfg.start_weight - curr_weight, 0)
-    start_fat = max(curr_fat + start_delta * FAT_RATIO, 0)
-    start_muscle = max(curr_muscle + start_delta * MUSCLE_RATIO, 0)
+    rows = []
+    
+    # 현재 상태
+    rows.append(BodyCompRow(
+        label="현재",
+        weight=curr_w,
+        skeletal_muscle=start_muscle,
+        fat_mass=start_fat,
+        body_fat_percent=round(start_fat/curr_w*100, 1) if curr_w>0 else 0
+    ))
 
-    rows: List[BodyCompRow] = [
-        BodyCompRow(
-            label="시작(추정)",
-            weight=round(cfg.start_weight, 1),
-            skeletal_muscle=round(start_muscle, 1),
-            fat_mass=round(start_fat, 1),
-            body_fat_percent=round(start_fat / cfg.start_weight * 100, 1) if cfg.start_weight > 0 else 0,
-        ),
-        BodyCompRow(
-            label="현재",
-            weight=round(curr_weight, 1),
-            skeletal_muscle=round(curr_muscle, 1),
-            fat_mass=round(curr_fat, 1),
-            body_fat_percent=round(curr_fat / curr_weight * 100, 1) if curr_weight > 0 else 0,
-        ),
-    ]
-
-    proj_weight = cfg.start_weight
-    proj_fat = start_fat
-    proj_muscle = start_muscle
-
-    extended_steps: List[PlanRow] = list(plan_rows)
-
-    # weekly_dose_plan이 있을 땐 사용자가 입력한 용량 시나리오만으로 체성분을 예측한다.
-    # 별도 입력이 없을 때만 기본 용량 체인을 끝까지 붙인다.
-    if not cfg.weekly_dose_plan:
-        projected_chain_weight = cfg.start_weight
-        for row in plan_rows:
-            projected_chain_weight -= row.expected_loss
-
-        if len(plan_rows) < len(steps):
-            for idx in range(len(plan_rows), len(steps)):
-                step = steps[idx]
-                phase_idx = min(idx, len(PHASE_DECAY) - 1)
-                projected_loss = abs(step.loss) * PHASE_DECAY[phase_idx]
-
-                start_weight = max(round(projected_chain_weight, 1), 0)
-                projected_weight = max(round(projected_chain_weight - projected_loss, 1), 0)
-
-                extended_steps.append(
-                    PlanRow(
-                        step_name=step.name,
-                        weeks=4,
-                        dose=step.dose,
-                        phase=_phase_label(phase_idx),
-                        expected_loss=round(projected_loss, 1),
-                        expected_weight=projected_weight,
-                        start_weight=start_weight,
-                        status="예정",
-                    )
-                )
-
-                projected_chain_weight -= projected_loss
-
-    for row in extended_steps:
-        weight_loss_step = row.expected_loss
-        fat_loss_step = weight_loss_step * FAT_RATIO
-        muscle_loss_step = weight_loss_step * MUSCLE_RATIO
-
-        proj_weight -= weight_loss_step
-        proj_fat -= fat_loss_step
-        proj_muscle -= muscle_loss_step
-
-        body_fat_percent = round(proj_fat / proj_weight * 100, 1) if proj_weight > 0 else 0
-
-        rows.append(
-            BodyCompRow(
-                label=f"{row.step_name} 종료",
-                weight=round(proj_weight, 1),
-                skeletal_muscle=round(proj_muscle, 1),
-                fat_mass=round(proj_fat, 1),
-                body_fat_percent=body_fat_percent,
-            )
-        )
-
-    if cfg.maintenance_months > 0 and rows:
-        rows.append(
-            BodyCompRow(
-                label="유지 종료",
-                weight=round(proj_weight, 1),
-                skeletal_muscle=round(proj_muscle, 1),
-                fat_mass=round(proj_fat, 1),
-                body_fat_percent=round(proj_fat / proj_weight * 100, 1) if proj_weight > 0 else 0,
-            )
-        )
+    # 적응기 종료 예측
+    # projection의 마지막 값
+    if projection:
+        final_proj = projection[-1]
+        final_w = final_proj["expected_weight_kg"]
+        
+        # 감량분
+        total_loss = curr_w - final_w
+        if total_loss > 0:
+            loss_fat = total_loss * FAT_RATIO
+            loss_muscle = total_loss * MUSCLE_RATIO
+            
+            pred_fat = max(0, start_fat - loss_fat)
+            pred_muscle = max(0, start_muscle - loss_muscle)
+            
+            rows.append(BodyCompRow(
+                label="적응기 종료",
+                weight=round(final_w, 1),
+                skeletal_muscle=round(pred_muscle, 1),
+                fat_mass=round(pred_fat, 1),
+                body_fat_percent=round(pred_fat/final_w*100, 1) if final_w>0 else 0
+            ))
 
     return rows
 
-
-def extend_plan_with_maintenance(cfg: Config, plan_rows: List[PlanRow]) -> List[PlanRow]:
-    """Return plan rows including a 유지 구간 for display purposes."""
-
-    if cfg.maintenance_months <= 0:
-        return plan_rows
-
-    display_rows = list(plan_rows)
-    maintenance_weeks = cfg.maintenance_months * 4
-    final_weight = plan_rows[-1].expected_weight if plan_rows else cfg.current_weight
-
-    display_rows.append(
-        PlanRow(
-            step_name=f"유지({cfg.maintenance_interval_weeks}주)",
-            weeks=maintenance_weeks,
-            dose=cfg.maintenance_dose,
-            phase="유지",
-            expected_loss=0.0,
-            expected_weight=round(final_weight, 1),
-            start_weight=round(final_weight, 1),
-            status="예정",
-        )
-    )
-
-    return display_rows
-
-
-def build_timeline(cfg: Config, plan_rows: List[PlanRow], weight_projection: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-    """Compute 예상 종료일 및 남은 D-DAY based on start_date."""
-
-    if not cfg.start_date:
-        return {}
-
-    try:
-        start_date = datetime.fromisoformat(cfg.start_date).date()
-    except ValueError:
-        return {}
-
-    adaptation_weeks = sum(row.weeks for row in plan_rows)
-    if weight_projection:
-        adaptation_weeks = max(adaptation_weeks, len(weight_projection) - 1)
-
-    maintenance_weeks = cfg.maintenance_months * 4
-    total_weeks = adaptation_weeks + maintenance_weeks
-
-    estimated_end = start_date + timedelta(weeks=total_weeks)
-    today = datetime.utcnow().date()
-    remaining_days = (estimated_end - today).days
-
-    maintenance_start = start_date + timedelta(weeks=adaptation_weeks)
-
-    if remaining_days > 0:
-        d_day = f"D-{remaining_days}"
-    elif remaining_days == 0:
-        d_day = "D-DAY"
-    else:
-        d_day = f"D+{abs(remaining_days)}"
-
-    return {
-        "start_date": start_date.isoformat(),
-        "maintenance_start_date": maintenance_start.isoformat(),
-        "estimated_end_date": estimated_end.isoformat(),
-        "remaining_days": remaining_days,
-        "d_day": d_day,
-        "total_weeks": total_weeks,
-    }
-
-
-def format_currency(value: int) -> str:
-    return format(int(value), ",")
-
-
-def _render_projection_table(weight_projection: List[Dict[str, Any]]) -> str:
-    if not weight_projection:
-        return "<p>감량 계획이 필요하지 않습니다.</p>"
-
-    rows_html = "".join(
-        f"<tr><td>{row['week_index']}</td><td>{row['dose_mg']:.1f}</td><td>{row['expected_loss_kg']:.2f}</td>"
-        f"<td>{row['expected_weight_kg']:.2f}</td></tr>"
-        for row in weight_projection
-    )
-
-    return f"""
-    <table>
-      <thead>
-        <tr><th>주차</th><th>투여 용량(mg)</th><th>해당 주 감량(kg)</th><th>예상 체중(kg)</th></tr>
-      </thead>
-      <tbody>{rows_html}</tbody>
-    </table>
-    <p class='note'>※ 위 감량 수치는 입력한 weekly_dose_plan을 그대로 사용한 단순 모델 추정치입니다.</p>
-    """
-
-
-def _render_cost_table(cost_summary: CostSummary) -> str:
-    dose_breakdown = ""
-    if cost_summary.dose_pens:
-        dose_rows = "".join(
-            f"<tr><td>{item['dose']}</td><td>{item['pens']}펜 (4펜 묶음 {item['bundles']}개)</td><td>{format_currency(item['cost'])}원</td></tr>"
-            for item in cost_summary.dose_breakdown
-        )
-        dose_breakdown = f"""
-        <p class='note'>적응기 용량별 펜 사용량</p>
-        <table>
-          <thead><tr><th>용량</th><th>펜 수</th><th>해당 비용</th></tr></thead>
-          <tbody>{dose_rows}</tbody>
-        </table>
-        <p class='note'>* 4펜 패키지 기준: 2.5mg 289,000원 / 5mg 380,000원 / 7.5·10mg 549,000원입니다. 4주 단위로 묶어 비용을 계산합니다.</p>
-        """
-
-    return f"""
-    <table>
-      <tbody>
-        <tr><th>적응기 누적비용</th><td>{format_currency(cost_summary.completed_adaptation_cost)}원</td></tr>
-        <tr><th>적응기 예정비용</th><td>{format_currency(cost_summary.upcoming_adaptation_cost)}원</td></tr>
-        <tr><th>적응기 총비용</th><td>{format_currency(cost_summary.adaptation_cost)}원</td></tr>
-        <tr><th>유지기 총비용</th><td>{format_currency(cost_summary.maintenance_cost)}원</td></tr>
-        <tr><th>유지기 펜 소요량</th><td>{cost_summary.maintenance_pens}펜 (4펜 묶음 {cost_summary.maintenance_bundles}개 기준)</td></tr>
-        <tr class='total'><th>전체 합계</th><td><strong>{format_currency(cost_summary.total_cost)}원</strong></td></tr>
-      </tbody>
-    </table>
-    {dose_breakdown}
-    """
-
-
-def _render_body_comp_table(rows: List[BodyCompRow], cfg: Config) -> str:
-    if not rows:
-        return ""
-
-    rows_html = "".join(
-        f"<tr><td>{r.label}</td><td>{r.weight:.1f}</td><td>{r.skeletal_muscle:.1f}</td>"
-        f"<td>{r.fat_mass:.1f}</td><td>{r.body_fat_percent:.1f}%</td></tr>" for r in rows
-    )
-
-    visceral_note = ""
-    if cfg.visceral_level is not None and rows:
-        fat_loss_total = max(rows[0].fat_mass - rows[-1].fat_mass, 0)
-        visceral_note = (
-            f"체지방량이 약 {fat_loss_total:.1f}kg 감소하면 내장지방 레벨은 대략 1~2 정도 감소할 가능성이 있습니다. (추정치)"
-        )
-
-    whr_note = "체지방률 감소에 따라 WHR도 약간 감소하는 경향이 있으며, 실제 값은 인바디로 확인해야 합니다."
-
-    return f"""
-    <div class='card'>
-      <h2>체성분 예측</h2>
-      <table>
-        <thead>
-          <tr><th>지점</th><th>체중(kg)</th><th>골격근량(kg)</th><th>체지방량(kg)</th><th>체지방률(%)</th></tr>
-        </thead>
-        <tbody>{rows_html}</tbody>
-      </table>
-      <p class='note'>모든 체성분 값은 단순 비율 모델에 따른 추정치이며, 시작 시점 수치는 현재 값에서 비율을 역산한 가상의 값입니다. 실제 인바디 측정값과 다를 수 있습니다.</p>
-      <p class='note'>{visceral_note}</p>
-      <p class='note'>{whr_note}</p>
-    </div>
-    """
-
-
-def _activity_label(level: str) -> str:
-    mapping = {
-        "baseline": "기본(보수적)",
-        "none": "운동 거의 안 함",
-        "moderate": "운동 보통",
-        "active": "운동 열심히",
-    }
-    return mapping.get(level.lower(), level)
-
-
 def generate_html(
     cfg: Config,
-    plan_rows: List[PlanRow],
     cost_summary: CostSummary,
     body_comp_rows: List[BodyCompRow],
-    steps: List[PlanStep],
-    weight_projection: List[Dict[str, Any]],
+    # weight_projection: List[Dict[str, Any]], # This is now handled in the template
+    plan_summary: PlanSummary,
+    timeline: Dict[str, Any]
 ) -> str:
-    remaining_loss = max(cfg.current_weight - cfg.target_weight, 0)
-    achieved_loss = max(cfg.start_weight - cfg.current_weight, 0)
+    # --- HTML 생성 도우미 ---
+    def fmt_money(v): return "{:,}".format(int(v))
+    
+    # 1. 개요 (Compact Dashboard)
+    # 중복 제거: 목표 체중과 예상 도달 체중이 비슷하면 하나만 표시
+    target_display = f"{cfg.target_weight}kg"
+    if abs(plan_summary.projected_weight - cfg.target_weight) > 0.1:
+        target_display += f" (예상 {plan_summary.projected_weight}kg)"
 
-    display_rows = extend_plan_with_maintenance(cfg, plan_rows)
-    timeline = build_timeline(cfg, plan_rows, weight_projection)
+    date_info = ""
+    if timeline.get('estimated_end_date'):
+        date_info = f"""
+        <div class='stat-box'>
+          <h3>종료 예상</h3>
+          <p>{timeline['estimated_end_date']}</p>
+          <small>{timeline['d_day']}</small>
+        </div>
+        """
 
     overview = f"""
-    <div class='card'>
-      <h2>개요</h2>
-      <p>시작 체중: {cfg.start_weight} kg / 현재 체중: {cfg.current_weight} kg / 목표 체중: {cfg.target_weight} kg</p>
-      <p>이미 감량: {achieved_loss:.1f} kg / 목표까지 남은 감량: {remaining_loss:.1f} kg</p>
-      <p>1단계(초기 4주) 감량 가정: {' , '.join(f"{s.name} {s.loss:.1f}kg" for s in steps)}</p>
-      <p>페이즈 약화 규칙: 2단계 x0.8, 3단계 x0.6 (초기&gt;중기&gt;후기로 완만해짐) / 활동 수준: {_activity_label(cfg.activity_level)}</p>
-      <p>유지 플랜: {cfg.maintenance_start_dose}mg 이후 유지 시작, 유지 용량 {cfg.maintenance_dose}mg, {cfg.maintenance_interval_weeks}주 간격, {cfg.maintenance_months}개월</p>
-      {f"<p>시작일 {timeline['start_date']} 기준 유지 종료 예상일: {timeline['estimated_end_date']} ({timeline['d_day']})</p>" if timeline else ''}
+    <div class='card summary-card'>
+      <div class='stat-grid'>
+        <div class='stat-box'>
+          <h3>체중 목표</h3>
+          <p>{cfg.current_weight}kg &rarr; {target_display}</p>
+          <small>남은 감량: {plan_summary.remaining_loss}kg</small>
+        </div>
+        <div class='stat-box'>
+          <h3>총 기간</h3>
+          <p>{plan_summary.total_weeks_with_maintenance}주</p>
+          <small>적응 {plan_summary.total_weeks}주 + 유지 {cfg.maintenance_months*4}주</small>
+        </div>
+        <div class='stat-box'>
+          <h3>총 비용</h3>
+          <p>{fmt_money(cost_summary.total_cost)}원</p>
+        </div>
+        {date_info}
+      </div>
     </div>
     """
 
-    plan_section = f"""
+    # 2. 감량 추이 테이블은 이제 home.html 템플릿에서 직접 렌더링합니다.
+    projection_html = ""
+
+    # 3. 비용 테이블 (Scrollable)
+    dose_rows = ""
+    for item in cost_summary.dose_breakdown:
+        dose_rows += f"""
+        <tr>
+          <td>{item['dose']}</td>
+          <td>{item['pens']}펜</td>
+          <td>{item['bundles']}박스</td>
+          <td>{fmt_money(item['cost'])}</td>
+        </tr>
+        """
+    
+    cost_html = f"""
     <div class='card'>
-      <h2>예상 감량 추이</h2>
-      {_render_projection_table(weight_projection)}
+      <h2>비용 상세</h2>
+      <div class='table-wrapper'>
+        <table>
+          <thead><tr><th>용량</th><th>수량</th><th>단위</th><th>비용</th></tr></thead>
+          <tbody>{dose_rows}</tbody>
+        </table>
+      </div>
+      <div class='cost-summary'>
+        <p>적응기: {fmt_money(cost_summary.adaptation_cost)}원 / 유지기: {fmt_money(cost_summary.maintenance_cost)}원</p>
+      </div>
     </div>
     """
 
-    cost_section = f"""
-    <div class='card'>
-      <h2>비용 요약</h2>
-      {_render_cost_table(cost_summary)}
-      <p class='note'>입력한 현재 체중을 기준으로 이미 거친 단계는 '누적비용'에, 앞으로 필요한 단계는 '예정비용'에 반영했습니다. 유지비용을 더해 총합을 표시합니다.</p>
-    </div>
-    """
+    # 4. 체성분
+    comp_rows = ""
+    for r in body_comp_rows:
+        comp_rows += f"<tr><td>{r.label}</td><td>{r.weight}</td><td>{r.skeletal_muscle}</td><td>{r.fat_mass}</td><td>{r.body_fat_percent}%</td></tr>"
+    
+    comp_html = ""
+    if comp_rows:
+        comp_html = f"""
+        <div class='card'>
+          <h2>체성분 예측</h2>
+          <div class='table-wrapper'>
+            <table>
+              <thead><tr><th>시점</th><th>체중</th><th>골격근</th><th>체지방</th><th>체지방률</th></tr></thead>
+              <tbody>{comp_rows}</tbody>
+            </table>
+          </div>
+        </div>
+        """
 
-    body_comp_section = _render_body_comp_table(body_comp_rows, cfg)
-
-    pattern_section = """
-    <div class='card'>
-      <h2>초기~중기 감량 참고치</h2>
-      <p class='note'>SURMOUNT 그래프와 실사용 경험을 단순 요약한 참고 범위입니다. 이 계산기는 1→2→3단계로 갈수록 0.8, 0.6배로 자동 완화합니다.</p>
-      <table>
-        <thead><tr><th>기간</th><th>보편적 감량 경향</th></tr></thead>
-        <tbody>
-          <tr><td>1~4주</td><td>-2 ~ -4kg</td></tr>
-          <tr><td>5~8주</td><td>-2 ~ -5kg</td></tr>
-          <tr><td>9~12주</td><td>-3 ~ -6kg</td></tr>
-          <tr><td>12주 누적</td><td>-6% ~ -12% (약 -6 ~ -12kg)</td></tr>
-        </tbody>
-      </table>
-      <table>
-        <thead><tr><th>7.5mg</th><th>운동 안 함</th><th>운동 보통</th><th>운동 열심히</th></tr></thead>
-        <tbody>
-          <tr><td>1단계(1~4주)</td><td>-2.0kg</td><td>-3.5kg</td><td>-5.0kg</td></tr>
-          <tr><td>2단계(5~8주)</td><td>-1.5kg</td><td>-3.0kg</td><td>-4.0kg</td></tr>
-          <tr><td>3단계(9~12주)</td><td>-1.0kg</td><td>-2.0kg</td><td>-3.0kg</td></tr>
-          <tr><td>3개월 누적</td><td colspan='3'>현실 범위: -6 ~ -12kg</td></tr>
-        </tbody>
-      </table>
-      <table>
-        <thead><tr><th>10mg</th><th>운동 안 함</th><th>운동 보통</th><th>운동 열심히</th></tr></thead>
-        <tbody>
-          <tr><td>1단계(1~4주)</td><td>-3.0kg</td><td>-4.5kg</td><td>-7.0kg</td></tr>
-          <tr><td>2단계(5~8주)</td><td>-2.0kg</td><td>-3.0kg</td><td>-5.0kg</td></tr>
-          <tr><td>3단계(9~12주)</td><td>-1.0kg</td><td>-2.0kg</td><td>-3.0kg</td></tr>
-          <tr><td>3개월 누적</td><td colspan='3'>현실 범위: -8 ~ -15kg (운동 병행 시 -12~-15kg 흔함)</td></tr>
-        </tbody>
-      </table>
-      <p class='note'>계산기는 1단계 기본값(초기 4주 예상 감량)을 입력/활동수준으로 잡고 2단계는 x0.8, 3단계는 x0.6으로 자동 적용합니다. 별도 입력이 없어도 현실적 패턴을 기본으로 사용합니다.</p>
-    </div>
-    """
-
-    disclaimer = """
-    <div class='card'>
-      <h2>주의/면책</h2>
-      <p class='note'>※ 이 리포트는 사용자가 입력한 값과 단순 수학적 모델에 기반한 '예상치'입니다. 실제 체중 변화, 혈당·당뇨 상태, 인바디 수치는 개인에 따라 크게 달라질 수 있습니다. 마운자로(티르제파타이드)의 용량 조절, 투여 시작·유지·중단, 다른 약과의 병용 여부 등 모든 의료적 결정은 반드시 담당 의사와 상의하여 결정해야 합니다. 이 프로그램은 의료적 진단이나 처방을 제공하지 않으며, 단지 정보를 정리하고 시각화하는 도구입니다.</p>
-      <p class='note'>기본 감량 가정은 SURMOUNT-1(비당뇨 10mg 평균 약 -19.5%/72주, 4주 평균 약 -1~2kg)과 SURMOUNT-2(당뇨 동반 10mg 평균 약 -13.4%/72주, 4주 평균 약 -0.8~1.5kg) 등 3상 연구의 평균치를 100kg 기준으로 환산해 보수적으로 설정했습니다. 개인별 식단·운동·질환 상태에 따라 실제 감량 속도는 크게 달라질 수 있습니다.</p>
-    </div>
-    """
-
+    # 스타일 및 조립
     style = """
     <style>
-      body { font-family: 'Pretendard', 'Noto Sans KR', sans-serif; background: #f5f6fa; margin: 0; padding: 20px; }
-      h1 { text-align: center; }
-      .card { background: #fff; padding: 16px 20px; margin-bottom: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); border-radius: 8px; }
-      table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-      th, td { border: 1px solid #e5e7eb; padding: 8px; text-align: center; }
-      thead { background: #f3f4f6; }
-      tbody tr:nth-child(even) { background: #fafafa; }
-      .note { color: #6b7280; font-size: 0.9em; margin-top: 6px; }
-      .total th, .total td { font-weight: 700; background: #fff7ed; }
+      body { font-family: 'Pretendard', sans-serif; background: #f5f6fa; padding: 10px; margin: 0; font-size: 14px; }
+      .card { background: #fff; padding: 15px; margin-bottom: 15px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+      h2 { margin: 0 0 10px 0; font-size: 1.1em; color: #333; }
+      h3 { margin: 0 0 5px 0; font-size: 0.9em; color: #666; font-weight: normal; }
+      
+      /* Summary Grid */
+      .stat-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+      .stat-box { background: #f8f9fa; padding: 10px; border-radius: 8px; text-align: center; }
+      .stat-box p { margin: 0; font-weight: bold; font-size: 1.1em; color: #2c3e50; }
+      .stat-box small { font-size: 0.8em; color: #888; display: block; margin-top: 4px; }
+
+      /* Tables */
+      .table-wrapper { max-height: 200px; overflow-y: auto; border: 1px solid #eee; border-radius: 4px; }
+      table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+      th, td { padding: 8px 4px; text-align: center; border-bottom: 1px solid #eee; }
+      th { background: #f9f9f9; position: sticky; top: 0; z-index: 1; }
+      
+      .cost-summary { margin-top: 10px; text-align: right; font-weight: bold; font-size: 0.9em; }
+      
+      /* Mobile Optimization */
+      @media (max-width: 480px) {
+        body { padding: 8px; }
+        .card { padding: 12px; margin-bottom: 10px; }
+        .stat-grid { grid-template-columns: 1fr 1fr; } 
+        th, td { font-size: 0.85em; padding: 6px 2px; }
+      }
     </style>
     """
-
-    body = f"""
-    <body>
-      <h1>마운자로 감량 플랜 리포트</h1>
-      {overview}
-      {plan_section}
-      {cost_section}
-      {body_comp_section}
-      {pattern_section}
-      {disclaimer}
-    </body>
-    """
-
-    return f"<!DOCTYPE html><html lang='ko'><head><meta charset='UTF-8'><title>마운자로 감량 플랜 리포트</title>{style}</head>{body}</html>"
-
+    
+    return f"<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>리포트</title>{style}</head><body>{overview}{cost_html}{comp_html}</body></html>"
 
 def generate_mounjaro_report(config: Dict[str, Any]) -> Dict[str, Any]:
-    """Generate the Mounjaro weight loss plan and HTML report.
-
-    Args:
-        config: Input configuration dictionary.
-
-    Returns:
-        A dictionary containing plan_table, body_comp_table, cost_summary, total_cost, and html.
-    """
-
+    """메인 진입점."""
     cfg = apply_defaults(config)
-    steps = build_steps(cfg)
+    
+    # 1. 감량 시뮬레이션
+    weight_projection = _project_weight_course(cfg)
+    
+    # 2. 비용 계산
+    cost_summary = calculate_costs(cfg)
+    
+    # 3. 체성분 예측
+    body_comp_rows = predict_body_composition(cfg, weight_projection)
+    
+    # 4. 요약 데이터 생성
+    # 적응기 주차 = 실제 용량이 있는 마지막 주차까지
+    non_zero_weeks = [w['week_index'] for w in weight_projection if w['dose_mg'] > 0 and w['week_index'] > 0]
+    last_adaptation_week = max(non_zero_weeks) if non_zero_weeks else 0
+    total_adaptation_weeks = last_adaptation_week # 중간에 0이 있어도 마지막까지를 기간으로 봄
+    
+    final_weight = weight_projection[-1]['expected_weight_kg'] if weight_projection else cfg.current_weight
+    
+    plan_summary = PlanSummary(
+        achieved_loss=round(cfg.start_weight - cfg.current_weight, 1),
+        remaining_loss=round(cfg.current_weight - cfg.target_weight, 1),
+        total_weeks=total_adaptation_weeks,
+        upcoming_weeks=total_adaptation_weeks, # 단순화
+        projected_weight=final_weight,
+        total_weeks_with_maintenance=total_adaptation_weeks + (cfg.maintenance_months * 4),
+        last_non_zero_week=last_adaptation_week
+    )
+    
+    # 타임라인
+    timeline = {}
+    if cfg.start_date:
+        try:
+            start_dt = datetime.strptime(cfg.start_date, "%Y-%m-%d").date()
+            # 적응기 종료
+            adapt_end_dt = start_dt + timedelta(weeks=total_adaptation_weeks)
+            # 유지기 종료
+            m_weeks = cfg.maintenance_months * 4
+            final_end_dt = adapt_end_dt + timedelta(weeks=m_weeks)
+            
+            today = datetime.now().date()
+            rem_days = (final_end_dt - today).days
+            d_day = f"D-{rem_days}" if rem_days > 0 else f"D+{abs(rem_days)}"
+            
+            timeline = {
+                "start_date": cfg.start_date,
+                "maintenance_start_date": adapt_end_dt.isoformat(),
+                "estimated_end_date": final_end_dt.isoformat(),
+                "remaining_days": rem_days,
+                "d_day": d_day
+            }
+        except ValueError:
+            pass
 
-    plan_rows = simulate_plan(cfg, steps)
-    display_plan_rows = extend_plan_with_maintenance(cfg, plan_rows)
-    cost_summary = calculate_costs(cfg, plan_rows, steps)
-    weight_projection = build_weight_projection(cfg, plan_rows, steps)
-    plan_summary = summarize_plan(cfg, plan_rows, weight_projection)
-    body_comp_rows = predict_body_composition(cfg, plan_rows, steps)
-    timeline = build_timeline(cfg, plan_rows, weight_projection)
-
-    html = generate_html(cfg, plan_rows, cost_summary, body_comp_rows, steps, weight_projection)
-
+    # HTML 생성
+    html = generate_html(cfg, cost_summary, body_comp_rows, plan_summary, timeline)
+    
     return {
-        "plan_table": [row.__dict__ for row in display_plan_rows],
-        "body_comp_table": [row.__dict__ for row in body_comp_rows],
-        "plan_summary": plan_summary.__dict__,
+        "report": True, # 플래그
+        "plan_summary": plan_summary,
         "weight_projection": weight_projection,
-        "cost_summary": {
-            "adaptation_cost": cost_summary.adaptation_cost,
-            "maintenance_cost": cost_summary.maintenance_cost,
-            "completed_adaptation_cost": cost_summary.completed_adaptation_cost,
-            "upcoming_adaptation_cost": cost_summary.upcoming_adaptation_cost,
-            "total_cost": cost_summary.total_cost,
-            "dose_pens": cost_summary.dose_pens,
-            "dose_costs": cost_summary.dose_costs,
-            "dose_unit_prices": cost_summary.dose_unit_prices,
-            "dose_bundles": cost_summary.dose_bundles,
-            "dose_breakdown": cost_summary.dose_breakdown,
-            "maintenance_pens": cost_summary.maintenance_pens,
-            "maintenance_bundles": cost_summary.maintenance_bundles,
-        },
-        "total_cost": cost_summary.total_cost,
+        "cost_summary": cost_summary,
+        "body_comp_table": body_comp_rows,
         "maintenance_summary": {
-            "weeks": cfg.maintenance_months * 4,
-            "interval_weeks": cfg.maintenance_interval_weeks,
             "dose": cfg.maintenance_dose,
+            "interval_weeks": cfg.maintenance_interval_weeks,
+            "weeks": cfg.maintenance_months * 4,
             "pens": cost_summary.maintenance_pens,
-            "bundles": cost_summary.maintenance_bundles,
+            "bundles": cost_summary.maintenance_bundles
         },
         "timeline": timeline,
-        "html": html,
+        "html": html
     }
-
-
-if __name__ == "__main__":
-    example_config = {
-        "start_weight": 95,
-        "current_weight": 92,
-        "target_weight": 80,
-        "skeletal_muscle": 35,
-        "fat_mass": 30,
-    }
-    report = generate_mounjaro_report(example_config)
-    print(report)

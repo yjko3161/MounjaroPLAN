@@ -64,11 +64,6 @@
   <section class="tab-panel" id="tab-input">
     <div class="card">
       <h2>계산기</h2>
-      {% set weekly_plan_raw = form_data.get('weekly_dose_plan','') %}
-      {% set weekly_plan_list = weekly_plan_raw.split(',') if weekly_plan_raw else [] %}
-      {% set weekly_plan_len = (weekly_plan_list|length) %}
-      {% set period_weeks = (form_data.get('period_weeks') or weekly_plan_len or 24)|int %}
-      {% set dose_options = ['0','2.5','5','7.5','10','12.5','15'] %}
       <div class="current-week-pill" id="current-week-indicator">플랜 시작일을 입력하면 현재 주차를 계산합니다.</div>
       <form method="post" action="/generate" id="plan-form">
         <input type="hidden" name="weekly_dose_plan" id="weekly_dose_plan_hidden" value="{{ weekly_plan_raw }}" />
@@ -77,7 +72,9 @@
           <div><label>시작 체중(kg)</label><input type="number" step="0.1" name="start_weight" value="{{ form_data.get('start_weight','') }}" required /></div>
           <div><label>현재 체중(kg)</label><input type="number" step="0.1" name="current_weight" value="{{ form_data.get('current_weight','') }}" required /></div>
           <div><label>목표 체중(kg)</label><input type="number" step="0.1" name="target_weight" value="{{ form_data.get('target_weight','') }}" required /></div>
-          <div><label>예상 진행 기간(주)</label><input type="number" step="1" name="period_weeks" value="{{ form_data.get('period_weeks','24') }}" placeholder="예: 24" /></div>
+          <div><label>예상 진행 기간(주)</label><input type="number" step="1" name="period_weeks" value="{{ form_data.get('period_weeks', period_weeks) }}" placeholder="예: 24" /></div>
+          <div><label>플랜 시작일</label><input type="date" name="start_date" value="{{ form_data.get('start_date','') }}" /></div>
+          <div><label><input type="checkbox" name="auto_titration" {% if form_data.get('auto_titration') %}checked{% endif %} /> 기본 증량 템플릿 제안</label><p class="note">체크해도 주차별 용량을 수정하면 해당 패턴을 그대로 사용합니다.</p></div>
           <div style="grid-column: span 2;">
             <label>주차별 실제 투여 용량</label>
             <select id="weekly-plan-template" style="margin-bottom: 10px;">
@@ -87,29 +84,23 @@
               <option value="2.5,2.5,5,5,5,5,7.5,7.5,7.5,7.5">2.5×2주 → 5×4주 → 7.5×4주</option>
             </select>
             <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); margin-bottom: 10px;">
-              {% for dose in ['2.5','5','7.5','10','12.5','15'] %}
-                <div>
-                  <label style="font-weight: 600;">{{ dose }}mg 회차</label>
-                  <select class="dose-count-select" data-dose="{{ dose }}">
-                    {% for count in range(0, period_weeks + 1) %}
-                      <option value="{{ count }}" {% if weekly_plan_list and weekly_plan_list|count(dose) == count %}selected{% endif %}>{{ count }}회</option>
-                    {% endfor %}
-                  </select>
-                </div>
+                {% for dose in ['2.5','5','7.5','10','12.5','15'] %}
+                  <div>
+                    <label style="font-weight: 600;">{{ dose }}mg 회차</label>
+                    <select class="dose-count-select" data-dose="{{ dose }}">
+                      {% for count in range(0, period_weeks + 1) %}
+                        {% set selected = 'selected' if dose_counts.get(dose, 0) == count else '' %}
+                        <option value="{{ count }}" {{ selected }}>{{ count }}회</option>
+                      {% endfor %}
+                    </select>
+                  </div>
               {% endfor %}
             </div>
-            <div class="weekly-plan-grid">
-              {% for week in range(1, period_weeks + 1) %}
-                {% set selected_value = '5' %}
-                {% if weekly_plan_list %}
-                  {% if weekly_plan_list|length >= week %}
-                    {% set selected_value = weekly_plan_list[week-1]|trim %}
-                  {% else %}
-                    {% set selected_value = weekly_plan_list[-1]|trim %}
-                  {% endif %}
-                {% endif %}
-                <div class="weekly-dose-row" data-week="{{ week }}">
-                  <div class="week-label">{{ week }}주차</div>
+              <div class="weekly-plan-grid">
+                {% for week in range(1, period_weeks + 1) %}
+                  {% set selected_value = weekly_plan_list[week-1] if weekly_plan_list|length >= week else weekly_plan_list[-1] %}
+                  <div class="weekly-dose-row" data-week="{{ week }}">
+                    <div class="week-label">{{ week }}주차</div>
                   <select class="weekly-dose-select" name="weekly_dose_plan[]" data-week-index="{{ week }}">
                     {% for option in dose_options %}
                       <option value="{{ option }}" {% if option|string == selected_value|string %}selected{% endif %}>{{ option }} mg</option>
@@ -140,7 +131,6 @@
           <div><label>유지 용량(mg)</label><input type="number" step="0.1" name="maintenance_dose" value="{{ form_data.get('maintenance_dose','') }}" placeholder="5" /></div>
           <div><label>유지 주기(주)</label><input type="number" step="1" name="maintenance_interval_weeks" value="{{ form_data.get('maintenance_interval_weeks','') }}" placeholder="4" /></div>
           <div><label>유지 기간(개월)</label><input type="number" step="1" name="maintenance_months" value="{{ form_data.get('maintenance_months','') }}" placeholder="3" /></div>
-          <div><label>플랜 시작일(YYYY-MM-DD)</label><input type="date" name="start_date" value="{{ form_data.get('start_date','') }}" /></div>
         </div>
         <p class="note">필수 항목(시작/현재/목표 체중)만 입력하면 기본 가정으로 리포트를 생성합니다. 사용자 이름을 입력하면 데이터가 저장되고 이력이 표시됩니다.</p>
         <p class="note">기본 감량값은 현실적인 초기 4주 수치(2.5mg -3kg, 5mg -2.5kg, 7.5mg -3kg, 10mg -4kg)를 시작점으로 잡고, 2단계는 0.8배, 3단계는 0.6배로 자동 완화됩니다. 운동/활동 수준을 선택하면 7.5mg/10mg 초기값이 함께 조정되며, 입력칸을 비워두면 자동 값이 적용되고 직접 입력 시 해당 값이 우선합니다. 모든 투약·감량 결정은 담당 의사와 상의해야 합니다.</p>
@@ -166,6 +156,11 @@
           <span class="pill">총 비용</span>
           <strong>{{ '{:,}'.format(report.cost_summary.total_cost) }}원</strong>
           <p class="note">적응기 + 유지기 합산</p>
+        </div>
+        <div class="summary-card">
+          <span class="pill">실제 투약 주차</span>
+          <strong>{{ report.plan_summary.last_non_zero_week }} 주</strong>
+          <p class="note">0mg 제외, 실제 투약이 있는 마지막 주차</p>
         </div>
         <div class="summary-card">
           <span class="pill">예상 도달 체중</span>
@@ -226,11 +221,11 @@
               <thead><tr><th>용량</th><th>펜 수(주)</th><th>해당 비용</th></tr></thead>
               <tbody>
                 {% for item in report.cost_summary.dose_breakdown %}
-                  <tr><td>{{ item.dose }}</td><td>{{ item.pens }}펜</td><td>{{ '{:,'.format(item.cost) }}원</td></tr>
+                  <tr><td>{{ item.dose }}</td><td>{{ item.pens }}펜 (4펜 묶음 {{ item.bundles }}개)</td><td>{{ '{:,'.format(item.cost) }}원</td></tr>
                 {% endfor %}
               </tbody>
             </table>
-            <p class="note">주차 수(=펜 수)에 용량별 단가를 곱해 적응기 비용에 반영합니다.</p>
+            <p class="note">1주 1펜 사용을 4펜(4주) 묶음 단가로 환산해 적응기 비용에 반영합니다. (2.5mg 289,000원 / 5mg 380,000원 / 7.5·10mg 549,000원)</p>
           {% endif %}
           <p class="note">현재 체중을 기준으로 이미 지나간 단계는 누적 비용에, 앞으로 필요한 단계는 예정 비용에 더해 총합을 계산했습니다.</p>
         </div>
@@ -357,6 +352,7 @@
   const currentWeekIndicator = document.getElementById('current-week-indicator');
   const doseCountSelects = document.querySelectorAll('.dose-count-select');
   const weeklyPlanTemplate = document.getElementById('weekly-plan-template');
+  const autoTitrationInput = document.querySelector('input[name="auto_titration"]');
 
   function activateTab(target) {
     tabButtons.forEach(btn =>
@@ -522,7 +518,13 @@
 
   syncWeeklyPlanString();
   syncTemplateSelector();
-  applyDoseCountsToWeeklyPlan();
+  if (autoTitrationInput?.checked && (!weeklyPlanHidden?.value || weeklyPlanHidden.value.trim() === '')) {
+    const recommended = weeklyPlanTemplate?.options?.[1]?.value;
+    if (recommended) {
+      applyTemplate(recommended);
+      weeklyPlanTemplate.value = recommended;
+    }
+  }
   calculateCurrentWeek();
 
   // 감량 그래프

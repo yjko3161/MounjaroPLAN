@@ -236,7 +236,7 @@
               <thead><tr><th>용량</th><th>펜 수(주)</th><th>해당 비용</th></tr></thead>
               <tbody>
                 {% for item in report.cost_summary.dose_breakdown %}
-                  <tr><td>{{ item.dose }}</td><td>{{ item.pens }}펜</td><td>{{ '{:,'.format(item.cost) }}원</td></tr>
+                  <tr><td>{{ item.dose }}</td><td>{{ item.pens }}펜</td><td>{{ '{:,}'.format(item.cost) }}원</td></tr>
                 {% endfor %}
               </tbody>
             </table>

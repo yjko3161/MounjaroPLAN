@@ -225,16 +225,8 @@
             <table>
               <thead><tr><th>용량</th><th>펜 수(주)</th><th>해당 비용</th></tr></thead>
               <tbody>
-                {% for dose, pens in report.cost_summary.dose_pens.items() %}
-                  {% set dose_val = (dose|string).replace('mg','').strip()|float %}
-                  {% if dose_val <= 2.5 %}
-                    {% set unit_price = 280000 %}
-                  {% elif dose_val <= 5 %}
-                    {% set unit_price = 380000 %}
-                  {% else %}
-                    {% set unit_price = 549000 %}
-                  {% endif %}
-                  <tr><td>{{ dose }}</td><td>{{ pens }}펜</td><td>{{ '{:,}'.format(unit_price * pens) }}원</td></tr>
+                {% for item in report.cost_summary.dose_breakdown %}
+                  <tr><td>{{ item.dose }}</td><td>{{ item.pens }}펜</td><td>{{ '{:,'.format(item.cost) }}원</td></tr>
                 {% endfor %}
               </tbody>
             </table>

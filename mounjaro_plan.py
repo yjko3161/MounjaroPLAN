@@ -59,6 +59,8 @@ class CostSummary:
     maintenance_cost: int
     completed_adaptation_cost: int
     dose_pens: Dict[str, int]
+    dose_costs: Dict[str, int]
+    dose_unit_prices: Dict[str, int]
     maintenance_pens: int
     maintenance_bundles: int
 
@@ -69,6 +71,25 @@ class CostSummary:
     @property
     def upcoming_adaptation_cost(self) -> int:
         return max(self.adaptation_cost - self.completed_adaptation_cost, 0)
+
+    @property
+    def dose_breakdown(self) -> List[Dict[str, int]]:
+        def _dose_sort_key(item: tuple[str, int]) -> float:
+            label = item[0].lower().replace("mg", "").strip()
+            try:
+                return float(label)
+            except ValueError:
+                return 0.0
+
+        return [
+            {
+                "dose": dose,
+                "pens": pens,
+                "unit_price": self.dose_unit_prices.get(dose, 0),
+                "cost": self.dose_costs.get(dose, 0),
+            }
+            for dose, pens in sorted(self.dose_pens.items(), key=_dose_sort_key)
+        ]
 
 
 @dataclass
@@ -128,6 +149,16 @@ def _optional_float(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def get_pen_price(dose_mg: float) -> int:
+    """Return the fixed pen price for a given dose in milligrams."""
+
+    if dose_mg <= 2.5:
+        return 280_000
+    if dose_mg <= 5:
+        return 380_000
+    return 549_000
 
 
 def _parse_weekly_dose_plan(value: Any) -> List[float]:
@@ -216,10 +247,10 @@ def build_steps(cfg: Config) -> List[PlanStep]:
         return user_value if user_value is not None else activity_defaults[key]
 
     return [
-        PlanStep("2.5mg", 2.5, _loss_value("2.5mg", cfg.loss_2_5), 280000),
-        PlanStep("5mg", 5.0, _loss_value("5mg", cfg.loss_5), 380000),
-        PlanStep("7.5mg", 7.5, _loss_value("7.5mg", cfg.loss_7_5), 549000),
-        PlanStep("10mg", 10.0, _loss_value("10mg", cfg.loss_10), 549000),
+        PlanStep("2.5mg", 2.5, _loss_value("2.5mg", cfg.loss_2_5), get_pen_price(2.5)),
+        PlanStep("5mg", 5.0, _loss_value("5mg", cfg.loss_5), get_pen_price(5.0)),
+        PlanStep("7.5mg", 7.5, _loss_value("7.5mg", cfg.loss_7_5), get_pen_price(7.5)),
+        PlanStep("10mg", 10.0, _loss_value("10mg", cfg.loss_10), get_pen_price(10.0)),
     ]
 
 
@@ -461,40 +492,43 @@ def simulate_plan(cfg: Config, steps: List[PlanStep]) -> List[PlanRow]:
 def calculate_costs(cfg: Config, plan_rows: List[PlanRow], steps: List[PlanStep]) -> CostSummary:
     """Calculate adaptation and maintenance costs including completed history."""
 
-    price_lookup = {step.name: step.price for step in steps}
+    weekly_dose_plan = _normalized_weekly_dose_plan(cfg, plan_rows, steps)
+    weekly_dose_plan, total_weeks = _apply_total_weeks(cfg, weekly_dose_plan)
 
     dose_pens: Dict[str, int] = {}
     dose_costs: Dict[str, int] = {}
+    dose_unit_prices: Dict[str, int] = {}
     completed_adaptation_cost = 0
+
+    for idx in range(total_weeks):
+        dose_value = weekly_dose_plan[idx] if idx < len(weekly_dose_plan) else weekly_dose_plan[-1]
+        dose_label = f"{dose_value:g}mg"
+        price = get_pen_price(dose_value)
+        dose_unit_prices[dose_label] = price
+        dose_pens[dose_label] = dose_pens.get(dose_label, 0) + 1
+        dose_costs[dose_label] = dose_costs.get(dose_label, 0) + price
+
+    adaptation_cost = sum(dose_costs.values())
 
     for row in plan_rows:
         pens = max(int(row.weeks), 0)
-        dose_pens[row.step_name] = dose_pens.get(row.step_name, 0) + pens
-        unit_price = price_lookup.get(row.step_name, 0)
-        dose_costs[row.step_name] = dose_costs.get(row.step_name, 0) + pens * unit_price
+        unit_price = get_pen_price(row.dose)
         if row.status in {"완료", "진행 중"}:
             completed_adaptation_cost += pens * unit_price
-
-    adaptation_cost = sum(dose_costs.values())
 
     total_maintenance_weeks = cfg.maintenance_months * 4
     shots_needed = ceil(total_maintenance_weeks / cfg.maintenance_interval_weeks) if total_maintenance_weeks else 0
     bundles = ceil(shots_needed / 4) if shots_needed else 0
-
-    if cfg.maintenance_dose <= 2.5:
-        price_maint = 280000
-    elif cfg.maintenance_dose <= 5:
-        price_maint = 380000
-    else:
-        price_maint = 549000
-
-    maintenance_cost = bundles * price_maint if bundles > 0 else 0
+    maintenance_price = get_pen_price(cfg.maintenance_dose)
+    maintenance_cost = bundles * maintenance_price if bundles > 0 else 0
 
     return CostSummary(
         adaptation_cost=adaptation_cost,
         maintenance_cost=maintenance_cost,
         completed_adaptation_cost=completed_adaptation_cost,
         dose_pens=dose_pens,
+        dose_costs=dose_costs,
+        dose_unit_prices=dose_unit_prices,
         maintenance_pens=shots_needed,
         maintenance_bundles=bundles,
     )
@@ -862,29 +896,12 @@ def _render_projection_table(weight_projection: List[Dict[str, Any]]) -> str:
     """
 
 
-def _dose_price_lookup(dose_label: str) -> int:
-    """Return price per pen for a given dose label (e.g., '2.5mg')."""
-
-    normalized = dose_label.lower().replace("mg", "").strip()
-    try:
-        dose_value = float(normalized)
-    except ValueError:
-        return 0
-
-    if dose_value <= 2.5:
-        return 280_000
-    if dose_value <= 5:
-        return 380_000
-    return 549_000
-
-
 def _render_cost_table(cost_summary: CostSummary) -> str:
     dose_breakdown = ""
     if cost_summary.dose_pens:
-        sorted_doses = sorted(cost_summary.dose_pens.items(), key=lambda item: float(str(item[0]).replace("mg", "").strip()))
         dose_rows = "".join(
-            f"<tr><td>{dose}</td><td>{pens}펜</td><td>{format_currency(pens * _dose_price_lookup(dose))}원</td></tr>"
-            for dose, pens in sorted_doses
+            f"<tr><td>{item['dose']}</td><td>{item['pens']}펜</td><td>{format_currency(item['cost'])}원</td></tr>"
+            for item in cost_summary.dose_breakdown
         )
         dose_breakdown = f"""
         <p class='note'>적응기 용량별 펜 사용량</p>
@@ -1104,6 +1121,9 @@ def generate_mounjaro_report(config: Dict[str, Any]) -> Dict[str, Any]:
             "upcoming_adaptation_cost": cost_summary.upcoming_adaptation_cost,
             "total_cost": cost_summary.total_cost,
             "dose_pens": cost_summary.dose_pens,
+            "dose_costs": cost_summary.dose_costs,
+            "dose_unit_prices": cost_summary.dose_unit_prices,
+            "dose_breakdown": cost_summary.dose_breakdown,
             "maintenance_pens": cost_summary.maintenance_pens,
             "maintenance_bundles": cost_summary.maintenance_bundles,
         },

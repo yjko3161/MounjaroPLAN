@@ -88,15 +88,25 @@
             </select>
             <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); margin-bottom: 10px;">
               {% for dose in ['2.5','5','7.5','10','12.5','15'] %}
-                <div>
-                  <label style="font-weight: 600;">{{ dose }}mg 회차</label>
-                  <select class="dose-count-select" data-dose="{{ dose }}">
-                    {% for count in range(0, period_weeks + 1) %}
-                      <option value="{{ count }}" {% if weekly_plan_list and weekly_plan_list|count(dose) == count %}selected{% endif %}>{{ count }}회</option>
-                    {% endfor %}
-                  </select>
-                </div>
-              {% endfor %}
+              {# weekly_plan_list 안에서 이 dose 가 몇 번 나오는지 미리 계산 #}
+              {% set dose_count = weekly_plan_list
+                  |select('equalto', dose)
+                  |list
+                  |length %}
+              <div>
+                <label style="font-weight: 600;">{{ dose }}mg 회차</label>
+                <select class="dose-count-select" data-dose="{{ dose }}">
+                  {% for count in range(0, period_weeks + 1) %}
+                    <option value="{{ count }}"
+                      {% if weekly_plan_list and dose_count == count %}
+                        selected
+                      {% endif %}
+                    >{{ count }}회</option>
+                  {% endfor %}
+                </select>
+              </div>
+            {% endfor %}
+
             </div>
             <div class="weekly-plan-grid">
               {% for week in range(1, period_weeks + 1) %}

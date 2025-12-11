@@ -40,6 +40,7 @@ class Config:
     loss_7_5: Optional[float] = None
     loss_10: Optional[float] = None
     activity_level: str = "baseline"  # baseline | none | moderate | active
+    auto_titration: bool = False
     period_weeks: Optional[int] = None
     weekly_dose_plan: List[float] = field(default_factory=list)
     skeletal_muscle: Optional[float] = None
@@ -61,8 +62,30 @@ class CostSummary:
     dose_pens: Dict[str, int]
     dose_costs: Dict[str, int]
     dose_unit_prices: Dict[str, int]
+    dose_bundles: Dict[str, int]
     maintenance_pens: int
     maintenance_bundles: int
+
+    @property
+    def dose_breakdown(self) -> List[Dict[str, Any]]:
+        def _dose_sort_key(label: str) -> float:
+            try:
+                return float(label.lower().replace("mg", "").strip())
+            except ValueError:
+                return 0.0
+
+        breakdown: List[Dict[str, Any]] = []
+        for dose in sorted(self.dose_pens.keys(), key=_dose_sort_key):
+            breakdown.append(
+                {
+                    "dose": dose,
+                    "pens": self.dose_pens.get(dose, 0),
+                    "bundles": self.dose_bundles.get(dose, 0),
+                    "pack_price": self.dose_unit_prices.get(dose, 0),
+                    "cost": self.dose_costs.get(dose, 0),
+                }
+            )
+        return breakdown
 
     @property
     def total_cost(self) -> int:
@@ -71,25 +94,6 @@ class CostSummary:
     @property
     def upcoming_adaptation_cost(self) -> int:
         return max(self.adaptation_cost - self.completed_adaptation_cost, 0)
-
-    @property
-    def dose_breakdown(self) -> List[Dict[str, int]]:
-        def _dose_sort_key(item: tuple[str, int]) -> float:
-            label = item[0].lower().replace("mg", "").strip()
-            try:
-                return float(label)
-            except ValueError:
-                return 0.0
-
-        return [
-            {
-                "dose": dose,
-                "pens": pens,
-                "unit_price": self.dose_unit_prices.get(dose, 0),
-                "cost": self.dose_costs.get(dose, 0),
-            }
-            for dose, pens in sorted(self.dose_pens.items(), key=_dose_sort_key)
-        ]
 
 
 @dataclass
@@ -114,6 +118,7 @@ class PlanSummary:
     upcoming_weeks: int
     projected_weight: float
     total_weeks_with_maintenance: int
+    last_non_zero_week: int
 
 
 @dataclass
@@ -152,13 +157,66 @@ def _optional_float(value: Any) -> Optional[float]:
 
 
 def get_pen_price(dose_mg: float) -> int:
-    """Return the fixed pen price for a given dose in milligrams."""
+    """Return the 4-pen package price for a given dose."""
 
     if dose_mg <= 2.5:
-        return 280_000
+        return 289_000
     if dose_mg <= 5:
         return 380_000
     return 549_000
+
+
+def _get_weekly_plan(cfg: Config) -> tuple[List[float], int]:
+    """Resolve the weekly dose plan as the single source of truth."""
+
+    plan = list(cfg.weekly_dose_plan)
+    if not plan and cfg.auto_titration:
+        plan = [2.5] * 4 + [5.0] * 4 + [7.5] * 4 + [10.0] * 4
+
+    total_weeks = cfg.period_weeks or len(plan) or 24
+    if total_weeks <= 0:
+        total_weeks = 24
+
+    if not plan:
+        plan = [0.0] * total_weeks
+    elif len(plan) < total_weeks:
+        plan.extend([plan[-1]] * (total_weeks - len(plan)))
+
+    plan = plan[:total_weeks]
+    return plan, total_weeks
+
+
+def _summarize_dose_pens(weekly_plan: List[float]) -> tuple[Dict[str, int], Dict[str, int], Dict[str, int], Dict[str, int], int]:
+    dose_pens: Dict[str, int] = {}
+    dose_costs: Dict[str, int] = {}
+    dose_unit_prices: Dict[str, int] = {}
+    dose_bundles: Dict[str, int] = {}
+    total_cost = 0
+
+    for dose_value in weekly_plan:
+        if dose_value <= 0:
+            continue
+        label = f"{dose_value:g}mg"
+        dose_pens[label] = dose_pens.get(label, 0) + 1
+
+    for label, pens in dose_pens.items():
+        numeric_dose = float(label.replace("mg", ""))
+        pack_price = get_pen_price(numeric_dose)
+        bundles = ceil(pens / 4)
+        cost = bundles * pack_price
+        dose_unit_prices[label] = pack_price
+        dose_costs[label] = cost
+        dose_bundles[label] = bundles
+        total_cost += cost
+
+    return dose_pens, dose_costs, dose_unit_prices, dose_bundles, total_cost
+
+
+def _cost_for_prefix(weekly_plan: List[float], weeks: int) -> int:
+    if weeks <= 0:
+        return 0
+    pens, costs, unit_prices, bundles, total_cost = _summarize_dose_pens(weekly_plan[:weeks])
+    return total_cost
 
 
 def _parse_weekly_dose_plan(value: Any) -> List[float]:
@@ -214,6 +272,7 @@ def apply_defaults(config: Dict[str, Any]) -> Config:
         loss_7_5=_optional_float(config.get("loss_7_5")),
         loss_10=_optional_float(config.get("loss_10")),
         activity_level=str(config.get("activity_level") or "baseline"),
+        auto_titration=bool(str(config.get("auto_titration") or "").lower() in {"true", "1", "on", "yes"}),
         period_weeks=_safe_int(config.get("period_weeks"), 0) or None,
         weekly_dose_plan=_parse_weekly_dose_plan(config.get("weekly_dose_plan")),
         skeletal_muscle=config.get("skeletal_muscle"),
@@ -397,72 +456,29 @@ def _simulate_weekly_course(cfg: Config, steps: List[PlanStep]) -> List[Dict[str
 def simulate_plan(cfg: Config, steps: List[PlanStep]) -> List[PlanRow]:
     """Simulate 감량을 목표 체중까지 이어가도록 반복합니다."""
 
-    if cfg.weekly_dose_plan:
-        plan_rows: List[PlanRow] = []
-        weekly_dose_plan, total_weeks = _apply_total_weeks(cfg, cfg.weekly_dose_plan)
-        projection = _project_weekly_losses(cfg, weekly_dose_plan, total_weeks)
-
-        if len(projection) <= 1:
-            return []
-
-        idx = 1  # projection[0]은 시작점
-        start_weight = projection[0]["expected_weight_kg"]
-        dose_to_name = {step.dose: step.name for step in steps}
-
-        while idx < len(projection):
-            current_dose = projection[idx]["dose_mg"]
-            start_idx = idx
-            while idx < len(projection) and projection[idx]["dose_mg"] == current_dose:
-                idx += 1
-
-            group = projection[start_idx:idx]
-            expected_loss = sum(item["expected_loss_kg"] for item in group)
-            expected_weight = group[-1]["expected_weight_kg"] if group else start_weight
-
-            if cfg.current_weight <= expected_weight:
-                status = "완료"
-            elif cfg.current_weight < start_weight:
-                status = "진행 중"
-            else:
-                status = "예정"
-
-            plan_rows.append(
-                PlanRow(
-                    step_name=dose_to_name.get(current_dose, f"{current_dose}mg"),
-                    weeks=len(group),
-                    dose=current_dose,
-                    phase="사용자 입력",
-                    expected_loss=round(expected_loss, 1),
-                    expected_weight=round(expected_weight, 1),
-                    start_weight=round(start_weight, 1),
-                    status=status,
-                )
-            )
-
-            start_weight = expected_weight
-
-        return plan_rows
-
-    weekly_course = _simulate_weekly_course(cfg, steps)
-    if not weekly_course:
+    weekly_dose_plan, total_weeks = _get_weekly_plan(cfg)
+    if not weekly_dose_plan:
         return []
 
     plan_rows: List[PlanRow] = []
-    idx = 0
-    start_weight = cfg.start_weight
+    projection = _project_weekly_losses(cfg, weekly_dose_plan, total_weeks)
 
-    while idx < len(weekly_course):
-        step_idx = weekly_course[idx]["step_index"]
-        step = steps[step_idx] if step_idx < len(steps) else steps[-1]
-        phase_idx = min(step_idx, len(PHASE_DECAY) - 1)
+    if len(projection) <= 1:
+        return []
 
-        group: List[Dict[str, Any]] = []
-        while idx < len(weekly_course) and weekly_course[idx]["step_index"] == step_idx:
-            group.append(weekly_course[idx])
+    idx = 1  # projection[0]은 시작점
+    start_weight = projection[0]["expected_weight_kg"]
+    dose_to_name = {step.dose: step.name for step in steps}
+
+    while idx < len(projection):
+        current_dose = projection[idx]["dose_mg"]
+        start_idx = idx
+        while idx < len(projection) and projection[idx]["dose_mg"] == current_dose:
             idx += 1
 
-        expected_loss = sum(item["loss"] for item in group)
-        expected_weight = group[-1]["weight"] if group else start_weight
+        group = projection[start_idx:idx]
+        expected_loss = sum(item["expected_loss_kg"] for item in group)
+        expected_weight = group[-1]["expected_weight_kg"] if group else start_weight
 
         if cfg.current_weight <= expected_weight:
             status = "완료"
@@ -473,10 +489,10 @@ def simulate_plan(cfg: Config, steps: List[PlanStep]) -> List[PlanRow]:
 
         plan_rows.append(
             PlanRow(
-                step_name=step.name,
+                step_name=dose_to_name.get(current_dose, f"{current_dose}mg"),
                 weeks=len(group),
-                dose=step.dose,
-                phase=_phase_label(phase_idx),
+                dose=current_dose,
+                phase="사용자 입력",
                 expected_loss=round(expected_loss, 1),
                 expected_weight=round(expected_weight, 1),
                 start_weight=round(start_weight, 1),
@@ -492,29 +508,11 @@ def simulate_plan(cfg: Config, steps: List[PlanStep]) -> List[PlanRow]:
 def calculate_costs(cfg: Config, plan_rows: List[PlanRow], steps: List[PlanStep]) -> CostSummary:
     """Calculate adaptation and maintenance costs including completed history."""
 
-    weekly_dose_plan = _normalized_weekly_dose_plan(cfg, plan_rows, steps)
-    weekly_dose_plan, total_weeks = _apply_total_weeks(cfg, weekly_dose_plan)
+    weekly_dose_plan, total_weeks = _get_weekly_plan(cfg)
+    dose_pens, dose_costs, dose_unit_prices, dose_bundles, adaptation_cost = _summarize_dose_pens(weekly_dose_plan)
 
-    dose_pens: Dict[str, int] = {}
-    dose_costs: Dict[str, int] = {}
-    dose_unit_prices: Dict[str, int] = {}
-    completed_adaptation_cost = 0
-
-    for idx in range(total_weeks):
-        dose_value = weekly_dose_plan[idx] if idx < len(weekly_dose_plan) else weekly_dose_plan[-1]
-        dose_label = f"{dose_value:g}mg"
-        price = get_pen_price(dose_value)
-        dose_unit_prices[dose_label] = price
-        dose_pens[dose_label] = dose_pens.get(dose_label, 0) + 1
-        dose_costs[dose_label] = dose_costs.get(dose_label, 0) + price
-
-    adaptation_cost = sum(dose_costs.values())
-
-    for row in plan_rows:
-        pens = max(int(row.weeks), 0)
-        unit_price = get_pen_price(row.dose)
-        if row.status in {"완료", "진행 중"}:
-            completed_adaptation_cost += pens * unit_price
+    completed_weeks = sum(row.weeks for row in plan_rows if row.status in {"완료", "진행 중"})
+    completed_adaptation_cost = _cost_for_prefix(weekly_dose_plan, completed_weeks)
 
     total_maintenance_weeks = cfg.maintenance_months * 4
     shots_needed = ceil(total_maintenance_weeks / cfg.maintenance_interval_weeks) if total_maintenance_weeks else 0
@@ -529,6 +527,7 @@ def calculate_costs(cfg: Config, plan_rows: List[PlanRow], steps: List[PlanStep]
         dose_pens=dose_pens,
         dose_costs=dose_costs,
         dose_unit_prices=dose_unit_prices,
+        dose_bundles=dose_bundles,
         maintenance_pens=shots_needed,
         maintenance_bundles=bundles,
     )
@@ -540,13 +539,18 @@ def summarize_plan(cfg: Config, plan_rows: List[PlanRow], weight_projection: Opt
     achieved_loss = max(cfg.start_weight - cfg.current_weight, 0)
     remaining_loss = max(cfg.current_weight - cfg.target_weight, 0)
     projected_weight = cfg.current_weight
+    weekly_plan, weekly_plan_total_weeks = _get_weekly_plan(cfg)
+    last_non_zero_week = 0
+    for idx, dose in enumerate(weekly_plan, start=1):
+        if dose > 0:
+            last_non_zero_week = idx
 
     if weight_projection:
         total_weeks = len(weight_projection) - 1
         upcoming_weeks = total_weeks
         projected_weight = weight_projection[-1].get("expected_weight_kg", cfg.current_weight)
     else:
-        total_weeks = sum(row.weeks for row in plan_rows)
+        total_weeks = weekly_plan_total_weeks or sum(row.weeks for row in plan_rows)
         upcoming_weeks = sum(row.weeks for row in plan_rows if row.status in {"예정", "진행 중"})
         if plan_rows:
             projected_weight = plan_rows[-1].expected_weight
@@ -558,45 +562,8 @@ def summarize_plan(cfg: Config, plan_rows: List[PlanRow], weight_projection: Opt
         upcoming_weeks=upcoming_weeks,
         projected_weight=round(projected_weight, 1),
         total_weeks_with_maintenance=total_weeks + cfg.maintenance_months * 4,
+        last_non_zero_week=last_non_zero_week,
     )
-
-
-def _normalized_weekly_dose_plan(cfg: Config, plan_rows: List[PlanRow], steps: Optional[List[PlanStep]]) -> List[float]:
-    """Choose the best-effort weekly dose plan for projection."""
-
-    if cfg.weekly_dose_plan:
-        return list(cfg.weekly_dose_plan)
-
-    if plan_rows:
-        expanded: List[float] = []
-        for row in plan_rows:
-            expanded.extend([row.dose] * max(row.weeks, 0))
-        if expanded:
-            return expanded
-
-    if steps:
-        expanded: List[float] = []
-        for step in steps:
-            expanded.extend([step.dose] * 4)
-        return expanded
-
-    return []
-
-
-def _apply_total_weeks(cfg: Config, weekly_dose_plan: List[float]) -> tuple[List[float], int]:
-    """Extend or seed the weekly 용량 계획 to match the 사용자가 입력한 기간."""
-
-    total_weeks = cfg.period_weeks or len(weekly_dose_plan)
-    if total_weeks <= 0:
-        total_weeks = len(weekly_dose_plan) or 12
-
-    plan = list(weekly_dose_plan)
-    if not plan:
-        plan = [2.5] * total_weeks
-    elif len(plan) < total_weeks:
-        plan.extend([plan[-1]] * (total_weeks - len(plan)))
-
-    return plan, total_weeks
 
 
 def _project_weekly_losses(cfg: Config, weekly_dose_plan: List[float], total_weeks: int) -> List[Dict[str, Any]]:
@@ -606,39 +573,6 @@ def _project_weekly_losses(cfg: Config, weekly_dose_plan: List[float], total_wee
         start_date = datetime.fromisoformat(cfg.start_date).date() if cfg.start_date else None
     except ValueError:
         start_date = None
-
-    total_target_loss = max(cfg.start_weight - cfg.target_weight, 0.0)
-    raw_losses: List[float] = []
-    total_lost_raw = 0.0
-    prev_dose = weekly_dose_plan[0]
-    weeks_on_same = 0
-
-    for idx in range(total_weeks):
-        current_dose = weekly_dose_plan[idx] if idx < len(weekly_dose_plan) else prev_dose
-
-        if idx == 0:
-            weeks_on_same = 1
-        elif current_dose == prev_dose:
-            weeks_on_same += 1
-        else:
-            weeks_on_same = 1
-
-        weekly_loss = _base_loss_for_projection(current_dose)
-        weekly_loss *= _adaptation_factor(weeks_on_same)
-        if idx > 0 and prev_dose > current_dose:
-            weekly_loss *= DOSE_DECAY_FACTOR
-        weekly_loss *= _plateau_factor(total_lost_raw)
-
-        weekly_loss = max(weekly_loss, 0.0)
-        raw_losses.append(weekly_loss)
-        total_lost_raw += weekly_loss
-        prev_dose = current_dose
-
-    if total_lost_raw <= 0:
-        scaled_losses = [total_target_loss / total_weeks] * total_weeks
-    else:
-        scale = total_target_loss / total_lost_raw
-        scaled_losses = [loss * scale for loss in raw_losses]
 
     projection: List[Dict[str, Any]] = []
     current_weight = cfg.start_weight
@@ -654,10 +588,34 @@ def _project_weekly_losses(cfg: Config, weekly_dose_plan: List[float], total_wee
         }
     )
 
-    for idx, weekly_loss in enumerate(scaled_losses, start=1):
-        remaining_to_target = max(current_weight - cfg.target_weight, 0.0)
-        applied_loss = min(weekly_loss, remaining_to_target)
-        current_weight = round(current_weight - applied_loss, 3)
+    total_lost = 0.0
+    prev_dose = weekly_dose_plan[0] if weekly_dose_plan else 0.0
+    weeks_on_same = 0
+
+    for idx in range(1, total_weeks + 1):
+        current_dose = weekly_dose_plan[idx - 1] if idx - 1 < len(weekly_dose_plan) else prev_dose
+
+        if idx == 1:
+            weeks_on_same = 1
+        elif current_dose == prev_dose:
+            weeks_on_same += 1
+        else:
+            weeks_on_same = 1
+
+        weekly_loss = _base_loss_for_projection(current_dose)
+        weekly_loss *= _adaptation_factor(weeks_on_same)
+        if prev_dose > current_dose:
+            weekly_loss *= DOSE_DECAY_FACTOR
+        weekly_loss *= _plateau_factor(total_lost)
+
+        if current_dose <= 0:
+            weekly_loss = 0.0
+
+        weekly_loss = max(weekly_loss, 0.0)
+        total_lost += weekly_loss
+        prev_dose = current_dose
+
+        current_weight = max(cfg.target_weight, round(current_weight - weekly_loss, 3))
 
         if start_date:
             label_date = start_date + timedelta(weeks=idx)
@@ -668,8 +626,8 @@ def _project_weekly_losses(cfg: Config, weekly_dose_plan: List[float], total_wee
         projection.append(
             {
                 "week_index": idx,
-                "dose_mg": weekly_dose_plan[idx - 1] if idx - 1 < len(weekly_dose_plan) else weekly_dose_plan[-1],
-                "expected_loss_kg": round(applied_loss, 3),
+                "dose_mg": current_dose,
+                "expected_loss_kg": round(weekly_loss, 3),
                 "expected_weight_kg": round(current_weight, 3),
                 "label": label,
             }
@@ -693,8 +651,7 @@ def build_weight_projection(cfg: Config, plan_rows: List[PlanRow], steps: Option
             }
         ]
 
-    weekly_dose_plan = _normalized_weekly_dose_plan(cfg, plan_rows, steps)
-    weekly_dose_plan, total_weeks = _apply_total_weeks(cfg, weekly_dose_plan)
+    weekly_dose_plan, total_weeks = _get_weekly_plan(cfg)
     return _project_weekly_losses(cfg, weekly_dose_plan, total_weeks)
 
 
@@ -900,7 +857,7 @@ def _render_cost_table(cost_summary: CostSummary) -> str:
     dose_breakdown = ""
     if cost_summary.dose_pens:
         dose_rows = "".join(
-            f"<tr><td>{item['dose']}</td><td>{item['pens']}펜</td><td>{format_currency(item['cost'])}원</td></tr>"
+            f"<tr><td>{item['dose']}</td><td>{item['pens']}펜 (4펜 묶음 {item['bundles']}개)</td><td>{format_currency(item['cost'])}원</td></tr>"
             for item in cost_summary.dose_breakdown
         )
         dose_breakdown = f"""
@@ -909,7 +866,7 @@ def _render_cost_table(cost_summary: CostSummary) -> str:
           <thead><tr><th>용량</th><th>펜 수</th><th>해당 비용</th></tr></thead>
           <tbody>{dose_rows}</tbody>
         </table>
-        <p class='note'>* 2.5mg 280,000원 / 5mg 380,000원 / 7.5mg·10mg 549,000원 단가를 주차 수(=펜 수)에 곱해 총비용을 계산합니다.</p>
+        <p class='note'>* 4펜 패키지 기준: 2.5mg 289,000원 / 5mg 380,000원 / 7.5·10mg 549,000원입니다. 4주 단위로 묶어 비용을 계산합니다.</p>
         """
 
     return f"""
@@ -1123,6 +1080,7 @@ def generate_mounjaro_report(config: Dict[str, Any]) -> Dict[str, Any]:
             "dose_pens": cost_summary.dose_pens,
             "dose_costs": cost_summary.dose_costs,
             "dose_unit_prices": cost_summary.dose_unit_prices,
+            "dose_bundles": cost_summary.dose_bundles,
             "dose_breakdown": cost_summary.dose_breakdown,
             "maintenance_pens": cost_summary.maintenance_pens,
             "maintenance_bundles": cost_summary.maintenance_bundles,
